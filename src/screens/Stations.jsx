@@ -57,6 +57,8 @@ export default function Stations() {
                 </div>
                 <div className="station-electrical" aria-label={`${s.name} electrical readings`}>
                   <StationReadout icon={<IconPulse />} label="Current" value={s.current != null ? `${s.current.toFixed(2)} A` : '—'} active={s.current != null} />
+                  <StationReadout icon={<IconBolt />} label="Voltage" value={s.voltage != null ? `${s.voltage.toFixed(2)} V` : '—'} active={s.voltage != null} />
+                  <StationReadout icon={<IconBolt />} label="Power" value={s.power != null ? `${s.power.toFixed(1)} W` : '—'} active={s.power != null} />
                 </div>
                 <div className="station-live-details">
                   <StationReadout icon={<IconBolt />} label="Transmitter" value={s.status === 'charging' ? 'ACTIVE' : 'STANDBY'} active={s.status === 'charging'} />
@@ -131,8 +133,15 @@ export default function Stations() {
                 <strong>{engagementLabel(state, selected)}</strong>
               </div>
               <div className="kv-row">
-                <span>Current</span>
-                <strong>{selected.current != null ? `${selected.current.toFixed(2)} A` : '—'}</strong>
+                <span>Current / Voltage</span>
+                <strong>
+                  {selected.current != null ? `${selected.current.toFixed(2)} A` : '—'} /{' '}
+                  {selected.voltage != null ? `${selected.voltage.toFixed(2)} V` : '—'}
+                </strong>
+              </div>
+              <div className="kv-row">
+                <span>Power</span>
+                <strong>{selected.power != null ? `${selected.power.toFixed(1)} W` : '—'}</strong>
               </div>
               <button
                 type="button"

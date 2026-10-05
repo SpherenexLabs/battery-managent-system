@@ -452,6 +452,19 @@
 .kv-icon.warn { color: var(--warn); }
 
 /* ---------- Overview ---------- */
+.overview-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 980px) {
+  .overview-split {
+    grid-template-columns: 1fr;
+  }
+}
+
 .metric-row {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));

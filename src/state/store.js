@@ -166,6 +166,8 @@ function computeStations(state) {
       : null;
     const name = state.stationNames[i] ?? (hasVehicleLocation ? nearbyStationName(i, location) : base.name);
     const current = state.stationCurrents[i];
+    const voltage = state.stationVoltages[i];
+    const power = current != null && voltage != null ? round1(Math.abs(current * voltage)) : null;
     return {
       ...base,
       ...location,
@@ -177,6 +179,8 @@ function computeStations(state) {
       availableSlots,
       distance,
       current,
+      voltage,
+      power,
       locationSource: reportedLocation != null ? 'iot' : hasVehicleLocation ? 'prototype' : 'default',
     };
   }).sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
@@ -339,10 +343,11 @@ export const initialState = {
   stationCapacity: [null, null, null, null],
   stationLocations: [null, null, null, null],
   stationNames: [null, null, null, null],
-  // Per-station wireless-transmitter current. Station 1 is the physical
-  // prototype bay and reads the controller's Current field; stations 2-4
-  // only report if StationNCurrent is published.
+  // Per-station wireless-transmitter telemetry. Station 1 is the physical
+  // prototype bay and reads the controller's Current / Voltage2 fields;
+  // stations 2-4 only report if StationNCurrent / StationNVoltage are published.
   stationCurrents: [null, null, null, null],
+  stationVoltages: [null, null, null, null],
   soc: null,
   soh: null,
 
@@ -434,11 +439,16 @@ function reducerInner(state, action) {
         const value = d[`Station${i + 1}Name`];
         return typeof value === 'string' && value.trim() ? value.trim() : state.stationNames[i];
       });
-      // Station 1 is the physical prototype bay and reads the controller's own
-      // "Current". Stations 2-4 only report if StationNCurrent exists.
+      // Station 1 is the physical prototype bay: its readings are the
+      // controller's own "Current" and "Voltage2" (the station-side voltage).
+      // Stations 2-4 only report if StationNCurrent / StationNVoltage exist.
       const stationCurrents = [0, 1, 2, 3].map((i) => {
         const value = i === 0 ? d.Current : d[`Station${i + 1}Current`];
         return typeof value === 'number' ? round1(value) : state.stationCurrents[i];
+      });
+      const stationVoltages = [0, 1, 2, 3].map((i) => {
+        const value = i === 0 ? d.Voltage2 : d[`Station${i + 1}Voltage`];
+        return typeof value === 'number' ? round1(value) : state.stationVoltages[i];
       });
 
       const soc = voltage == null ? state.soc : socFromVoltage(voltage);
@@ -504,6 +514,7 @@ function reducerInner(state, action) {
         stationLocations,
         stationNames,
         stationCurrents,
+        stationVoltages,
         soc,
         soh,
         charging,

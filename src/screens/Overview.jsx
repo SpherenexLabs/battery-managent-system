@@ -15,6 +15,7 @@ import {
   IconWarning,
 } from '../components/icons.jsx';
 import { formatClock } from '../utils/format.js';
+import Scene3D from '../components/Scene3D.jsx';
 
 const STATION_META = {
   available: { label: 'Available', color: 'green' },
@@ -171,76 +172,84 @@ export default function Overview() {
         />
       </div>
 
-      <section className="alerts-panel card" aria-label="Live battery alerts">
-        <div className="alerts-panel-header">
-          <IconWarning className={activeAlerts.length ? 'text-warn' : 'muted'} />
-          <h2>Alerts{activeAlerts.length ? ` (${activeAlerts.length})` : ''}</h2>
-        </div>
-
-        {activeAlerts.length === 0 ? (
-          <div className="overview-alert nominal">
-            <IconCheck />
-            <span>No active battery alerts. All monitored conditions are within the configured limits.</span>
+      <div className="overview-split">
+        <section className="alerts-panel card" aria-label="Live battery alerts">
+          <div className="alerts-panel-header">
+            <IconWarning className={activeAlerts.length ? 'text-warn' : 'muted'} />
+            <h2>Alerts{activeAlerts.length ? ` (${activeAlerts.length})` : ''}</h2>
           </div>
-        ) : (
-          <div className="alert-item-list">
-            {activeAlerts.map((alert) => {
-              const startedAt = state.alertTimestamps[alert.id];
-              return (
-                <div key={alert.id} className={`alert-item ${alert.severity}`}>
-                  <div className="alert-item-head">
-                    <IconWarning />
-                    <div>
-                      <strong>{alertTitle(alert)}</strong>
-                      <p>{alert.label}</p>
-                    </div>
-                    {startedAt && <span className="alert-item-time">{formatClock(new Date(startedAt))}</span>}
-                  </div>
 
-                  {alert.id === 'low-battery' && (
-                    <div className="alert-item-stations">
-                      <span className="muted small">Nearest charging stations (free bays first)</span>
-                      <div className="alert-station-list">
-                        {nearestStations.map((station) => {
-                          const meta = STATION_META[station.status];
-                          return (
-                            <button
-                              key={station.id}
-                              type="button"
-                              className="alert-station-row"
-                              onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
-                            >
-                              <IconStation />
-                              <div className="alert-station-info">
-                                <strong>{station.name}</strong>
-                                <StatusDot color={meta.color} label={`${station.availableSlots}/${station.totalSlots} slots free`} />
-                              </div>
-                              <span className="alert-station-distance">
-                                {station.distance != null ? `${station.distance.toFixed(1)} km` : '—'}
-                              </span>
-                            </button>
-                          );
-                        })}
+          {activeAlerts.length === 0 ? (
+            <div className="overview-alert nominal">
+              <IconCheck />
+              <span>No active battery alerts. All monitored conditions are within the configured limits.</span>
+            </div>
+          ) : (
+            <div className="alert-item-list">
+              {activeAlerts.map((alert) => {
+                const startedAt = state.alertTimestamps[alert.id];
+                return (
+                  <div key={alert.id} className={`alert-item ${alert.severity}`}>
+                    <div className="alert-item-head">
+                      <IconWarning />
+                      <div>
+                        <strong>{alertTitle(alert)}</strong>
+                        <p>{alert.label}</p>
                       </div>
-                      <button
-                        type="button"
-                        className="btn btn-accent btn-block"
-                        onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
-                      >
-                        Find a charging station →
-                      </button>
+                      {startedAt && <span className="alert-item-time">{formatClock(new Date(startedAt))}</span>}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
 
-        <button type="button" className="alerts-panel-link" onClick={() => dispatch({ type: 'GO_TO', screen: 'health' })}>
-          View All Alerts →
-        </button>
-      </section>
+                    {alert.id === 'low-battery' && (
+                      <div className="alert-item-stations">
+                        <span className="muted small">Nearest charging stations (free bays first)</span>
+                        <div className="alert-station-list">
+                          {nearestStations.map((station) => {
+                            const meta = STATION_META[station.status];
+                            return (
+                              <button
+                                key={station.id}
+                                type="button"
+                                className="alert-station-row"
+                                onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+                              >
+                                <IconStation />
+                                <div className="alert-station-info">
+                                  <strong>{station.name}</strong>
+                                  <StatusDot color={meta.color} label={`${station.availableSlots}/${station.totalSlots} slots free`} />
+                                </div>
+                                <span className="alert-station-distance">
+                                  {station.distance != null ? `${station.distance.toFixed(1)} km` : '—'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-accent btn-block"
+                          onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+                        >
+                          Find a charging station →
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <button type="button" className="alerts-panel-link" onClick={() => dispatch({ type: 'GO_TO', screen: 'health' })}>
+            View All Alerts →
+          </button>
+        </section>
+
+        <Scene3D
+          title="Live Direction"
+          hint={`Live command: ${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}
+          mode="drive"
+        />
+      </div>
 
       <div className="trend-row">
         <TrendCard
