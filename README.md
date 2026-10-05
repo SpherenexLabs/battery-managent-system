@@ -2,7 +2,7 @@
 
 A live React dashboard for an EV battery-management prototype. It reads real-time
 telemetry from an IoT controller (published to Firebase Realtime Database under
-`bms_5578`), derives battery state, raises predictive failure alerts, and writes
+`BMS_5578`), derives battery state, raises predictive failure alerts, and writes
 control commands back to the hardware — drive direction, artificial heating level,
 coolant pump relay, and cooling fan relay.
 
@@ -38,7 +38,7 @@ health and alerts.**
 | --- | --- |
 | Live telemetry | Vehicle voltage, station voltage, current, temperature, heating level, pump relay, fan relay and drive direction — streamed from Firebase with no polling |
 | Battery state | SOC derived from vehicle pack voltage, SOH estimated from temperature/voltage |
-| Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `bms_5578/direction` |
+| Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `BMS_5578/direction` |
 | Auto driving | Named routes of timed direction steps ("forward 5s, left 10s, right 8s, backward 9s"), stored in Firebase, with create / edit / delete and timed playback |
 | Test before saving | Any step, or a whole draft, can be sent to the vehicle for real while you are still editing it — so a timing can be checked against the hardware before it is committed |
 | Reserve & play | Reserving a station means picking one of your saved routes; confirming the reservation plays it immediately |
@@ -57,7 +57,7 @@ health and alerts.**
 ```
 ┌───────────────────────┐        writes         ┌────────────────────────┐
 │  IoT / BMS Controller │  ──────────────────▶  │  Firebase Realtime DB  │
-│  (ESP32 / Arduino)    │                       │    /bms_5578  (live)   │
+│  (ESP32 / Arduino)    │                       │    /BMS_5578  (live)   │
 │                       │  ◀──────────────────  │    /auto_routes (saved)│
 │  • Voltage1 (vehicle) │        reads          └───────────┬────────────┘
 │  • Voltage2 (station) │                                   │
@@ -96,7 +96,7 @@ helpers.
 
 On mount, [EvContext.jsx](src/state/EvContext.jsx) opens two Firebase listeners:
 
-- `subscribeBmsData()` — an `onValue` stream on the `/bms_5578` node. Every hardware
+- `subscribeBmsData()` — an `onValue` stream on the `/BMS_5578` node. Every hardware
   write fires a `BMS_UPDATE` action carrying the whole snapshot.
 - `subscribeConnection()` — watches `.info/connected` to drive the **IoT Cloud Link**
   online/offline badge and the `offline` alert.
@@ -177,11 +177,11 @@ fast mode is blocked whenever the battery is above the warning limit.
 
 ## 4. Firebase Data Contract
 
-Live telemetry lives under **`/bms_5578`**; saved auto routes live under
+Live telemetry lives under **`/BMS_5578`**; saved auto routes live under
 **`/auto_routes`**. The dashboard reads every field it knows and ignores anything else,
 so extra keys are harmless.
 
-### `/bms_5578` — live telemetry
+### `/BMS_5578` — live telemetry
 
 | Key | Type | Direction | Meaning |
 | --- | --- | --- | --- |
@@ -228,7 +228,7 @@ telemetry node so the controller's live stream carries only live values.
 
 ### Optional station fields
 
-All optional — supply them under `/bms_5578` to replace the prototype defaults.
+All optional — supply them under `/BMS_5578` to replace the prototype defaults.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
@@ -243,7 +243,7 @@ All optional — supply them under `/bms_5578` to replace the prototype defaults
 
 ```json
 {
-  "bms_5578": {
+  "BMS_5578": {
     "Current": 0,
     "Heat": 0,
     "Relay1": 0,
@@ -339,7 +339,7 @@ When no rule fires, a single resolved **"No active battery alerts"** row is show
 
 - **Node.js 20.19+ or 22.12+** (required by Vite 8)
 - A Firebase project with **Realtime Database** enabled
-- An IoT controller writing to the `/bms_5578` node (or write values manually in the
+- An IoT controller writing to the `/BMS_5578` node (or write values manually in the
   Firebase console to test)
 - A browser with geolocation permission — distances and directions need it
 
@@ -364,7 +364,7 @@ npm run dev        # dev server with hot reload -> http://localhost:5173
 The database URL is set in [src/firebase.js](src/firebase.js):
 
 ```
-https://smart-vehicle-2eeac-default-rtdb.firebaseio.com
+https://diet-planner-3bdf3-default-rtdb.firebaseio.com
 ```
 
 Realtime Database reaches the server through `databaseURL` alone, so that field is the
@@ -377,7 +377,7 @@ For a prototype with no authentication, the database rules must allow reads and 
 ```json
 {
   "rules": {
-    "bms_5578":    { ".read": true, ".write": true },
+    "BMS_5578":    { ".read": true, ".write": true },
     "auto_routes": { ".read": true, ".write": true }
   }
 }
@@ -393,7 +393,7 @@ For a prototype with no authentication, the database rules must allow reads and 
 2. **Allow** the browser's location prompt when asked.
 3. Check the sidebar's **IoT Cloud Link** badge reads **Online** (green).
 4. Confirm the Overview metric cards show real numbers, not `—`. A dash means no data
-   has arrived on `/bms_5578` yet.
+   has arrived on `/BMS_5578` yet.
 
 ---
 
@@ -480,7 +480,7 @@ forces a fresh high-accuracy fix. If location is blocked, distances and directio
   panel's confirm button.
 - **Directions** — opens Google Maps driving directions from the vehicle's live position
   to that station in a new tab.
-- **Simulate Occupied / Free Slot** — writes `bms_5578/Slot{N}` to fake a vehicle in
+- **Simulate Occupied / Free Slot** — writes `BMS_5578/Slot{N}` to fake a vehicle in
   that bay. Use this to demo occupancy handling without physical hardware.
 
 **Right-hand panel** (after selecting a station) shows the full reservation detail, an
@@ -509,7 +509,7 @@ This is where you actually drive the vehicle. Two modes, switched with the **Man
 Auto** toggle at the top.
 
 **Drive status banner.** Plain-language status plus the **live command** currently
-sitting in `bms_5578/direction`.
+sitting in `BMS_5578/direction`.
 
 **Live 3D View.** A three.js scene of the charging yard — ground grid, all four station
 pads (the reserved one highlighted and pulsing), and the vehicle. It is not a canned
@@ -540,7 +540,7 @@ A five-button pad laid out the way you would expect:
           ▼ Backward (B)
 ```
 
-Pressing a button writes that single letter to `bms_5578/direction` immediately. The
+Pressing a button writes that single letter to `BMS_5578/direction` immediately. The
 command **stays latched** until you press another button — the pad highlights whichever
 one is currently active (Stop highlights red), and the readout underneath repeats it.
 
@@ -580,7 +580,7 @@ editing — no saving required.
 | **Stop test** | Ends the trial immediately and writes `S` |
 
 > **A test moves the real vehicle.** It writes the same letters to
-> `bms_5578/direction` that a saved route does. The only difference is bookkeeping —
+> `BMS_5578/direction` that a saved route does. The only difference is bookkeeping —
 > nothing is written to `/auto_routes`, and finishing a test never marks the vehicle
 > arrived or advances a reservation.
 
@@ -665,7 +665,7 @@ system summary of pump, fan, heater pad and temperature sensor.
 - **Manual** — enables **Turn cooling ON / OFF** (both relays together) plus individual
   **Pump (Relay1)** and **Fan (Relay2)** toggles.
 
-**Artificial Battery Heating (Heat %).** A 0–100 % slider writing to `bms_5578/Heat`,
+**Artificial Battery Heating (Heat %).** A 0–100 % slider writing to `BMS_5578/Heat`,
 plus **Turn heater ON** (sets 40 %) and **Turn heater OFF**. It exists to raise battery
 temperature deliberately so the thermal-safety chain can be demonstrated.
 
@@ -709,7 +709,7 @@ A complete demo run, start to finish:
 2. **Watch Overview** — metric cards fill with live vehicle voltage, station voltage,
    current, temperature, SOC and SOH; sparklines begin building history.
 3. **Open Drive Control.** In **Manual** mode, press **Forward** — `F` goes straight to
-   `bms_5578/direction`, and the 3D vehicle drives forward with it. Try **Left**,
+   `BMS_5578/direction`, and the 3D vehicle drives forward with it. Try **Left**,
    **Right**, **Backward**, then **Stop**.
 4. **Switch to Auto.** Click **+ New route**, name it, and build
    `F 5s → L 10s → R 8s → B 9s` with **+ Add step**.
@@ -831,7 +831,7 @@ Vercel needs no configuration beyond pointing it at the repo.
 > ### Read this before you make the URL public
 >
 > Firebase's web config always ships inside the client bundle; that is normal and
-> unavoidable. What matters is the **database rules**. While `/bms_5578` and
+> unavoidable. What matters is the **database rules**. While `/BMS_5578` and
 > `/auto_routes` are world-writable, **anyone who opens the deployed link can drive the
 > vehicle** — press Forward, toggle the heater and relays, or delete saved routes.
 >
@@ -894,7 +894,7 @@ project root. Both commands open a browser to authenticate.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| All metrics show `—` | Nothing has been written to `/bms_5578` yet. Check the controller and confirm the node exists in the Firebase console. |
+| All metrics show `—` | Nothing has been written to `/BMS_5578` yet. Check the controller and confirm the node exists in the Firebase console. |
 | **SOC stuck at 0 % and a permanent low-battery alert** | `Voltage1` is below `SOC_VOLTAGE_MIN`. Set `SOC_VOLTAGE_MIN` / `SOC_VOLTAGE_MAX` in `store.js` to your sensor's actual empty/full range. |
 | IoT Cloud Link shows **Offline** | Wrong `databaseURL` in [src/firebase.js](src/firebase.js), no internet, or database rules denying reads. |
 | Distances and bearings show `—` | Location permission denied or unavailable. Click **Refresh Current Location** on the Stations screen and allow the prompt. Chrome requires `localhost` or HTTPS for geolocation. |

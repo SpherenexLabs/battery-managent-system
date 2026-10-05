@@ -2,7 +2,7 @@ import { onValue, ref, remove, set } from 'firebase/database';
 import { database } from '../firebase.js';
 
 // Live telemetry node published by the vehicle controller.
-export const BMS_PATH = 'bms_5578';
+export const BMS_PATH = 'BMS_5578';
 
 // Saved auto-drive routes. Kept in a sibling node rather than inside the
 // telemetry node so the controller's live stream carries only live values.

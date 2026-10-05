@@ -190,7 +190,7 @@ export default function Navigation() {
         )}
 
         <InfoNote>
-          Every command is written straight to <code>bms_5578/direction</code> as a single letter — F forward,
+          Every command is written straight to <code>BMS_5578/direction</code> as a single letter — F forward,
           B backward, L left, R right, S stop. An auto route sends each step's letter and holds it for that
           step's duration before moving on.
         </InfoNote>
