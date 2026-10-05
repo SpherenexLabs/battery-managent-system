@@ -1,9 +1,7 @@
-import { useState } from 'react';
 import { routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote, StatusDot, Card } from '../components/ui.jsx';
 import { IconBolt, IconCheck, IconPulse, IconStation, IconTarget } from '../components/icons.jsx';
 import { setStationOccupied } from '../state/bms.js';
-import { bearingDeg, compassLabel, distanceKm } from '../utils/geo.js';
 
 const STATION_META = {
   available: { label: 'Available', color: 'green' },
@@ -12,13 +10,6 @@ const STATION_META = {
   charging: { label: 'Charging', color: 'teal' },
 };
 
-function stationDirection(vehicleLocation, station) {
-  if (vehicleLocation.lat == null || vehicleLocation.lng == null) return null;
-  const km = distanceKm(vehicleLocation.lat, vehicleLocation.lng, station.lat, station.lng);
-  const compass = compassLabel(bearingDeg(vehicleLocation.lat, vehicleLocation.lng, station.lat, station.lng));
-  return { km, compass };
-}
-
 export default function Stations() {
   const state = useEvState();
   const dispatch = useEvDispatch();
@@ -26,71 +17,25 @@ export default function Stations() {
   const reservationLocked = state.reservationStatus === 'confirmed';
   const canReserveNavigate = !reservationLocked;
   const chosenRoute = state.routes.find((r) => r.id === state.selectedRouteId) ?? null;
-  const [isFetchingLocation, setIsFetchingLocation] = useState(false);
 
   function toggleSimulator(station) {
     setStationOccupied(station.id, station.filledSlots === 0);
   }
 
-  function openDirections(station) {
-    if (state.vehicleLocation.lat == null || state.vehicleLocation.lng == null) return;
-    const origin = `${state.vehicleLocation.lat},${state.vehicleLocation.lng}`;
-    const destination = `${station.lat},${station.lng}`;
-    window.open(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`, '_blank', 'noopener,noreferrer');
-  }
-
-  function refreshCurrentLocation() {
-    if (!navigator.geolocation) {
-      dispatch({ type: 'SET_VEHICLE_LOCATION_ERROR', error: 'Geolocation is not supported by this browser.' });
-      return;
-    }
-    setIsFetchingLocation(true);
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        dispatch({ type: 'SET_VEHICLE_LOCATION', lat: position.coords.latitude, lng: position.coords.longitude });
-        setIsFetchingLocation(false);
-      },
-      (error) => {
-        dispatch({ type: 'SET_VEHICLE_LOCATION_ERROR', error: error.message });
-        setIsFetchingLocation(false);
-      },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
-    );
-  }
-
   return (
     <div className={`screen screen-split stations-screen ${selected ? 'has-station-selection' : 'no-station-selection'}`}>
       <div className="screen-main">
-        <PageHeader title="4 Nearby Charging Stations" subtitle="Sorted by live distance from your current vehicle location, with real-time availability and directions." />
+        <PageHeader title="4 Nearby Charging Stations" subtitle="Real-time slot availability. The vehicle drives to a station using your saved auto routes." />
 
         <InfoNote title="Wireless charging station setup">
           Every station monitors its charging bay through the IoT link. Reserve an available station and the vehicle
           will begin automatic navigation to its wireless charging transmitter.
         </InfoNote>
 
-        <div className="station-location-bar">
-          <div>
-            <span className={state.vehicleLocation.lat != null ? 'text-ok' : 'text-warn'}>
-            {state.vehicleLocation.lat != null
-                ? `Vehicle current location: ${state.vehicleLocation.lat.toFixed(5)}, ${state.vehicleLocation.lng.toFixed(5)}`
-                : 'Waiting for browser GPS location'}
-            </span>
-            <span className="muted small station-location-help">
-              {state.vehicleLocation.lat != null
-                ? 'Live browser GPS is used to calculate station distance and directions.'
-                : 'Allow location access to calculate nearby-station distance and navigation.'}
-            </span>
-          </div>
-          <button type="button" className="btn btn-outline" disabled={isFetchingLocation} onClick={refreshCurrentLocation}>
-            {isFetchingLocation ? 'Fetching location...' : 'Refresh Current Location'}
-          </button>
-        </div>
-
         <div className="station-grid">
           {state.stations.map((s) => {
             const meta = STATION_META[s.status];
             const isSelected = s.id === state.selectedStationId;
-            const dir = stationDirection(state.vehicleLocation, s);
             return (
               <div key={s.id} className={`station-card ${isSelected ? 'selected' : ''}`}>
                 {isSelected && (
@@ -105,9 +50,6 @@ export default function Stations() {
                 <div className="station-card-art">
                   <IconStation width="48" height="48" />
                 </div>
-                <p className="muted small">
-                  {dir ? `${dir.km.toFixed(2)} km · ${dir.compass}` : 'Waiting for location…'}
-                </p>
                 <div className="station-slot-summary" aria-label={`${s.name} slot availability`}>
                   <span><strong>{s.availableSlots}</strong> available</span>
                   <span><strong>{s.filledSlots}</strong> filled</span>
@@ -115,8 +57,6 @@ export default function Stations() {
                 </div>
                 <div className="station-electrical" aria-label={`${s.name} electrical readings`}>
                   <StationReadout icon={<IconPulse />} label="Current" value={s.current != null ? `${s.current.toFixed(2)} A` : '—'} active={s.current != null} />
-                  <StationReadout icon={<IconBolt />} label="Voltage" value={s.voltage != null ? `${s.voltage.toFixed(2)} V` : '—'} active={s.voltage != null} />
-                  <StationReadout icon={<IconBolt />} label="Power" value={s.power != null ? `${s.power.toFixed(1)} W` : '—'} active={s.power != null} />
                 </div>
                 <div className="station-live-details">
                   <StationReadout icon={<IconBolt />} label="Transmitter" value={s.status === 'charging' ? 'ACTIVE' : 'STANDBY'} active={s.status === 'charging'} />
@@ -142,8 +82,8 @@ export default function Stations() {
                   <button
                     type="button"
                     className="btn btn-outline"
-                    disabled={state.vehicleLocation.lat == null}
-                    onClick={() => openDirections(s)}
+                    title="Open your saved directions on Drive Control"
+                    onClick={() => dispatch({ type: 'GO_TO', screen: 'navigation' })}
                   >
                     Directions
                   </button>
@@ -165,11 +105,6 @@ export default function Stations() {
           Please confirm your reservation. The vehicle will navigate automatically to the selected station.
         </InfoNote>
 
-        {state.vehicleLocation.error && (
-          <InfoNote tone="warning" title="Location unavailable">
-            {state.vehicleLocation.error} Distance and direction to stations require location access.
-          </InfoNote>
-        )}
       </div>
 
       <div className="screen-side">
@@ -185,7 +120,7 @@ export default function Stations() {
               </div>
               <div className="kv-row">
                 <span>Route</span>
-                <strong>Predefined Track</strong>
+                <strong>{chosenRoute ? chosenRoute.name : 'Choose a saved route'}</strong>
               </div>
               <div className="kv-row">
                 <span>Live slots</span>
@@ -196,32 +131,15 @@ export default function Stations() {
                 <strong>{engagementLabel(state, selected)}</strong>
               </div>
               <div className="kv-row">
-                <span>Current / Voltage</span>
-                <strong>
-                  {selected.current != null ? `${selected.current.toFixed(2)} A` : '—'} /{' '}
-                  {selected.voltage != null ? `${selected.voltage.toFixed(2)} V` : '—'}
-                </strong>
-              </div>
-              <div className="kv-row">
-                <span>Power</span>
-                <strong>{selected.power != null ? `${selected.power.toFixed(1)} W` : '—'}</strong>
-              </div>
-              <div className="kv-row">
-                <span>Distance / Direction</span>
-                <strong>
-                  {(() => {
-                    const dir = stationDirection(state.vehicleLocation, selected);
-                    return dir ? `${dir.km.toFixed(2)} km · ${dir.compass}` : '—';
-                  })()}
-                </strong>
+                <span>Current</span>
+                <strong>{selected.current != null ? `${selected.current.toFixed(2)} A` : '—'}</strong>
               </div>
               <button
                 type="button"
                 className="btn btn-outline btn-block"
-                disabled={state.vehicleLocation.lat == null}
-                onClick={() => openDirections(selected)}
+                onClick={() => dispatch({ type: 'GO_TO', screen: 'navigation' })}
               >
-                Directions in Maps
+                Directions
               </button>
               <div className="kv-row">
                 <span>Reservation</span>

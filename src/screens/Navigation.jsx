@@ -236,10 +236,6 @@ export default function Navigation() {
             <span>Vehicle voltage</span>
             <strong>{state.voltage != null ? `${state.voltage.toFixed(2)} V` : '—'}</strong>
           </div>
-          <div className="kv-row">
-            <span>Station voltage</span>
-            <strong>{state.stationVoltage != null ? `${state.stationVoltage.toFixed(2)} V` : '—'}</strong>
-          </div>
         </div>
 
         <h3 className="side-title">Route progress</h3>

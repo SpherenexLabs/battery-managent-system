@@ -2,19 +2,11 @@ import { createContext, useContext } from 'react';
 import { distanceKm } from '../utils/geo.js';
 
 // Live battery temperature thresholds (°C)
-const WARN_TEMP = 20; // safety limit — heater cut off, fast charging downgraded, overheat alert
-const CRITICAL_TEMP = 30; // critical limit — charging fully paused
-
-// Automatic cooling runs on its own thresholds. The pump and fan are there
-// to hold the pack temperature down during normal running, so they must be
-// independent of WARN_TEMP — otherwise routine cooling would also put the
-// dashboard into its "overheated" state (heater locked, fast charging off).
-const COOLING_ON_TEMP = 30; // above this, coolant pump + fan switch ON
-const COOLING_OFF_TEMP = 28; // back at or below this, they switch OFF again
-// The gap between the two is deliberate: with a single switching point the
-// relays would chatter whenever the temperature sat right on it.
+// Alert-only thresholds: nothing is locked or switched automatically — the
+// heater, pump and fan are always under the operator's manual control.
+const WARN_TEMP = 20; // high-temperature alert
+const CRITICAL_TEMP = 30; // critical-temperature alert
 const LOW_SOC_THRESHOLD = 15; // % — "find a nearby charging station" alert
-const HEAT_SAFETY_THRESHOLD = 20; // % heat — crossing this proactively engages cooling
 
 // SOC is derived from the vehicle pack voltage (Voltage1). Firebase publishes
 // no direct SOC field. Range matches this pack's expected empty/full voltage.
@@ -30,17 +22,13 @@ const CURRENT_SWING_THRESHOLD = 2.0; // A, abnormal swing between consecutive re
 const TEMPERATURE_RISE_THRESHOLD = 3.0; // °C, rapid rise between consecutive readings
 const SOC_JUMP_THRESHOLD = 10; // %, implausible jump between consecutive readings
 const REPEATED_OVERHEAT_COUNT = 3; // occurrences within the history window
-const FREQUENT_COOLING_COUNT = 3; // occurrences within the history window
 const SLOW_CHARGE_MIN_MINUTES = 5; // minutes of active charging before judging rate
 const SLOW_CHARGE_MIN_GAIN = 1; // % SOC expected to gain within that window
 
 export const THERMAL_LIMITS = {
   WARN_TEMP,
   CRITICAL_TEMP,
-  COOLING_ON_TEMP,
-  COOLING_OFF_TEMP,
   LOW_SOC_THRESHOLD,
-  HEAT_SAFETY_THRESHOLD,
 };
 
 // Drive commands understood by the controller.
@@ -112,9 +100,6 @@ function sohEstimate(temperature, voltage) {
   return Math.round(clamp(soh, 40, 100));
 }
 
-const isWarnState = (state) => state.temperature != null && state.temperature >= WARN_TEMP;
-const isCriticalState = (state) => state.temperature != null && state.temperature >= CRITICAL_TEMP;
-
 // Placeholder coordinates for the 4 charging stations — replace with real
 // site coordinates once known. Used only for live distance/direction from
 // the vehicle's current (browser geolocation) position.
@@ -181,8 +166,6 @@ function computeStations(state) {
       : null;
     const name = state.stationNames[i] ?? (hasVehicleLocation ? nearbyStationName(i, location) : base.name);
     const current = state.stationCurrents[i];
-    const voltage = state.stationVoltages[i];
-    const power = current != null && voltage != null ? round1(Math.abs(current * voltage)) : null;
     return {
       ...base,
       ...location,
@@ -194,8 +177,6 @@ function computeStations(state) {
       availableSlots,
       distance,
       current,
-      voltage,
-      power,
       locationSource: reportedLocation != null ? 'iot' : hasVehicleLocation ? 'prototype' : 'default',
     };
   }).sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
@@ -217,23 +198,14 @@ export function computeAlerts(state) {
   if (state.temperature != null && state.temperature >= CRITICAL_TEMP) {
     alerts.push({
       id: 'critical-temp',
-      label: `Battery critically overheated (${state.temperature.toFixed(1)}°C). Turn on thermal cooling immediately.`,
+      label: `Battery temperature is critical (${state.temperature.toFixed(1)}°C).`,
       severity: 'high',
       status: 'active',
     });
   } else if (state.temperature != null && state.temperature >= WARN_TEMP) {
     alerts.push({
       id: 'overheat',
-      label: 'Battery is overheated. Please turn on thermal cooling.',
-      severity: 'high',
-      status: 'active',
-    });
-  }
-
-  if (state.heatPercent >= HEAT_SAFETY_THRESHOLD) {
-    alerts.push({
-      id: 'heater-pwm-high',
-      label: `Heating level (${state.heatPercent}%) crossed the ${HEAT_SAFETY_THRESHOLD}% safety threshold — cooling should be engaged.`,
+      label: `Battery temperature is high (${state.temperature.toFixed(1)}°C).`,
       severity: 'high',
       status: 'active',
     });
@@ -245,16 +217,6 @@ export function computeAlerts(state) {
       id: 'repeated-overheat',
       label: `Battery degradation warning — ${overheatCount} overheating events in the last 15 minutes. Maintenance required.`,
       severity: 'high',
-      status: 'active',
-    });
-  }
-
-  const coolingCount = trimByWindow(state.history.coolingActivations, now).length;
-  if (coolingCount >= FREQUENT_COOLING_COUNT) {
-    alerts.push({
-      id: 'frequent-cooling',
-      label: `Cooling system frequently active — pump activated ${coolingCount} times in the last 15 minutes. Maintenance required.`,
-      severity: 'medium',
       status: 'active',
     });
   }
@@ -282,7 +244,7 @@ export function computeAlerts(state) {
     if (prev.temperature != null && last.temperature != null && last.temperature - prev.temperature >= TEMPERATURE_RISE_THRESHOLD) {
       alerts.push({
         id: 'rapid-temperature-rise',
-        label: `Battery overheating risk detected — temperature rose ${round1(last.temperature - prev.temperature)}°C between live readings. Check cooling and reduce charging load.`,
+        label: `Rapid temperature rise — ${round1(last.temperature - prev.temperature)}°C between live readings.`,
         severity: 'high',
         status: 'active',
       });
@@ -346,7 +308,6 @@ export const initialState = {
 
   // Live BMS telemetry (null until the first Firebase read arrives)
   voltage: null, // Voltage1 — vehicle pack voltage
-  stationVoltage: null, // Voltage2 — voltage measured at the charging station
   current: null,
   temperature: null,
   pumpRelay: 0, // Relay1 — coolant pump
@@ -378,16 +339,14 @@ export const initialState = {
   stationCapacity: [null, null, null, null],
   stationLocations: [null, null, null, null],
   stationNames: [null, null, null, null],
-  // Per-station wireless-transmitter telemetry. Station 1 is the physical
-  // prototype bay and reads the controller's Current / Voltage2 fields;
-  // stations 2-4 only report if StationNCurrent / StationNVoltage are published.
+  // Per-station wireless-transmitter current. Station 1 is the physical
+  // prototype bay and reads the controller's Current field; stations 2-4
+  // only report if StationNCurrent is published.
   stationCurrents: [null, null, null, null],
-  stationVoltages: [null, null, null, null],
   soc: null,
   soh: null,
 
   vehicleStatus: 'idle', // idle | moving | arrived | charging
-  thermalAcknowledged: false,
 
   selectedStationId: null,
   reservationStatus: 'none', // none | pending | confirmed
@@ -406,14 +365,9 @@ export const initialState = {
     energyWh: 0,
   },
 
-  cooling: {
-    mode: 'automatic', // automatic | manual
-  },
-
   history: {
     samples: [], // { t, voltage, current, temperature, soc }
     overheatEvents: [], // timestamps the battery crossed into the warning zone
-    coolingActivations: [], // timestamps the cooling relay switched on
   },
 
   vehicleLocation: { lat: null, lng: null, error: null, updatedAt: null },
@@ -450,7 +404,6 @@ function reducerInner(state, action) {
       const d = action.data || {};
       const now = Date.now();
       const voltage = typeof d.Voltage1 === 'number' ? round1(d.Voltage1) : state.voltage;
-      const stationVoltage = typeof d.Voltage2 === 'number' ? round1(d.Voltage2) : state.stationVoltage;
       const current = typeof d.Current === 'number' ? round1(d.Current) : state.current;
       const temperature = typeof d.Temp === 'number' ? round1(d.Temp) : state.temperature;
       const pumpRelay = typeof d.Relay1 === 'number' ? (d.Relay1 > 0 ? 1 : 0) : state.pumpRelay;
@@ -481,23 +434,17 @@ function reducerInner(state, action) {
         const value = d[`Station${i + 1}Name`];
         return typeof value === 'string' && value.trim() ? value.trim() : state.stationNames[i];
       });
-      // Station 1 is the physical prototype bay: its readings are the
-      // controller's own "Current" and "Voltage2" (the station-side voltage).
-      // Stations 2-4 only report if StationNCurrent / StationNVoltage exist.
+      // Station 1 is the physical prototype bay and reads the controller's own
+      // "Current". Stations 2-4 only report if StationNCurrent exists.
       const stationCurrents = [0, 1, 2, 3].map((i) => {
         const value = i === 0 ? d.Current : d[`Station${i + 1}Current`];
         return typeof value === 'number' ? round1(value) : state.stationCurrents[i];
-      });
-      const stationVoltages = [0, 1, 2, 3].map((i) => {
-        const value = i === 0 ? d.Voltage2 : d[`Station${i + 1}Voltage`];
-        return typeof value === 'number' ? round1(value) : state.stationVoltages[i];
       });
 
       const soc = voltage == null ? state.soc : socFromVoltage(voltage);
       const soh = temperature == null || voltage == null ? state.soh : sohEstimate(temperature, voltage);
 
       let eventLog = state.eventLog;
-      let thermalAcknowledged = state.thermalAcknowledged;
 
       const wasLow = state.soc != null && state.soc <= LOW_SOC_THRESHOLD;
       const isLow = soc != null && soc <= LOW_SOC_THRESHOLD;
@@ -511,20 +458,13 @@ function reducerInner(state, action) {
       const isCritical = temperature != null && temperature >= CRITICAL_TEMP;
 
       if (isWarn && !wasWarn) {
-        eventLog = pushLog(
-          eventLog,
-          `Battery reached safety temperature limit (${temperature.toFixed(1)}°C) — heater cut off, cooling engaged.`
-        );
-        thermalAcknowledged = false;
-        if (state.heatPercent > 0) {
-          eventLog = pushLog(eventLog, 'Artificial heater safety cut-off triggered.');
-        }
+        eventLog = pushLog(eventLog, `Battery temperature high (${temperature.toFixed(1)}°C).`);
       }
       if (!isWarn && wasWarn) {
         eventLog = pushLog(eventLog, `Battery temperature back to safe range (${temperature.toFixed(1)}°C).`);
       }
       if (isCritical && !wasCritical) {
-        eventLog = pushLog(eventLog, `Battery critically overheated (${temperature.toFixed(1)}°C).`);
+        eventLog = pushLog(eventLog, `Battery temperature critical (${temperature.toFixed(1)}°C).`);
       }
 
       if (pumpRelay !== state.pumpRelay) {
@@ -535,13 +475,6 @@ function reducerInner(state, action) {
       }
 
       let charging = state.charging;
-      if (isCritical && charging.active) {
-        charging = { ...charging, active: false, mode: 'paused', sessionStartedAt: null, sessionStartSoc: null };
-        eventLog = pushLog(eventLog, 'Charging paused automatically — battery critically overheated.');
-      } else if (isWarn && charging.mode === 'fast') {
-        charging = { ...charging, mode: 'normal' };
-        eventLog = pushLog(eventLog, 'Fast charging stopped — switched to normal charging (battery temperature above safe limit).');
-      }
       if (charging.active && soc != null && soc >= 100 && charging.mode !== 'complete') {
         charging = { ...charging, mode: 'complete', active: false, sessionStartedAt: null, sessionStartSoc: null };
         eventLog = pushLog(eventLog, 'Battery fully charged (100% SOC) — charging session complete.');
@@ -552,13 +485,10 @@ function reducerInner(state, action) {
       );
       let overheatEvents = trimByWindow(state.history.overheatEvents, now);
       if (isWarn && !wasWarn) overheatEvents = [...overheatEvents, now];
-      let coolingActivations = trimByWindow(state.history.coolingActivations, now);
-      if (pumpRelay === 1 && state.pumpRelay !== 1) coolingActivations = [...coolingActivations, now];
 
       return withAlertTimestamps({
         ...state,
         voltage,
-        stationVoltage,
         current,
         temperature,
         pumpRelay,
@@ -574,13 +504,11 @@ function reducerInner(state, action) {
         stationLocations,
         stationNames,
         stationCurrents,
-        stationVoltages,
         soc,
         soh,
         charging,
         eventLog,
-        thermalAcknowledged,
-        history: { samples, overheatEvents, coolingActivations },
+        history: { samples, overheatEvents },
         connectivity: { online: true, lastSync: now },
       });
     }
@@ -602,9 +530,6 @@ function reducerInner(state, action) {
 
     case 'SET_VEHICLE_LOCATION_ERROR':
       return { ...state, vehicleLocation: { ...state.vehicleLocation, error: action.error } };
-
-    case 'SET_COOLING_MODE':
-      return { ...state, cooling: { mode: action.mode } };
 
     case 'SET_DRIVE_MODE': {
       if (state.driveMode === action.mode) return state;
@@ -737,13 +662,6 @@ function reducerInner(state, action) {
       };
     }
 
-    case 'ACK_THERMAL_ALERT':
-      return {
-        ...state,
-        thermalAcknowledged: true,
-        eventLog: pushLog(state.eventLog, 'Temperature warning acknowledged by operator.'),
-      };
-
     case 'STOP_VEHICLE':
       return {
         ...state,
@@ -804,8 +722,6 @@ function reducerInner(state, action) {
 
     case 'START_CHARGING_SESSION': {
       if (!state.charging.arrivalConfirmed) return state;
-      const critical = isCriticalState(state);
-      const active = !critical;
       return {
         ...state,
         vehicleStatus: 'charging',
@@ -813,24 +729,18 @@ function reducerInner(state, action) {
         charging: {
           ...state.charging,
           coilAligned: true,
-          active,
-          mode: critical ? 'paused' : 'normal',
-          sessionStartedAt: active ? Date.now() : null,
-          sessionStartSoc: active ? state.soc : null,
+          active: true,
+          mode: 'normal',
+          sessionStartedAt: Date.now(),
+          sessionStartSoc: state.soc,
           energyWh: 0,
         },
-        eventLog: pushLog(
-          state.eventLog,
-          critical
-            ? `Coil aligned at Station ${state.selectedStationId} — charging held, battery critically overheated.`
-            : `Coil aligned — wireless charging started at Station ${state.selectedStationId}.`
-        ),
+        eventLog: pushLog(state.eventLog, `Coil aligned — wireless charging started at Station ${state.selectedStationId}.`),
       };
     }
 
     case 'SET_CHARGING_MODE': {
-      if (isCriticalState(state)) return state;
-      if (action.mode === 'fast' && (!state.charging.coilAligned || isWarnState(state))) return state;
+      if (action.mode === 'fast' && !state.charging.coilAligned) return state;
       if (action.mode === 'complete') return state;
       const active = action.mode !== 'paused';
       return {
@@ -846,7 +756,6 @@ function reducerInner(state, action) {
     }
 
     case 'TOGGLE_CHARGING_ACTIVE': {
-      if (isCriticalState(state)) return state;
       const active = !state.charging.active;
       return {
         ...state,

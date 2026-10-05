@@ -1,5 +1,5 @@
 import { getChargingPower, useEvDispatch, useEvState } from '../state/store.js';
-import { PageHeader, InfoNote, ProgressBar } from '../components/ui.jsx';
+import { PageHeader, ProgressBar } from '../components/ui.jsx';
 import { IconCar, IconCheck, IconTarget } from '../components/icons.jsx';
 import { THERMAL_LIMITS } from '../state/store.js';
 import Scene3D from '../components/Scene3D.jsx';
@@ -18,8 +18,6 @@ export default function Charging() {
   const dispatch = useEvDispatch();
   const { charging } = state;
   const tempSafe = state.temperature == null || state.temperature < THERMAL_LIMITS.WARN_TEMP;
-  const overheatWarn = state.temperature != null && state.temperature >= THERMAL_LIMITS.WARN_TEMP;
-  const criticalPaused = state.temperature != null && state.temperature >= THERMAL_LIMITS.CRITICAL_TEMP;
   const coolingActive = state.pumpRelay === 1 || state.fanRelay === 1;
   const chargePct = state.soc ?? 0;
   const chargingPower = getChargingPower(state);
@@ -92,27 +90,9 @@ export default function Charging() {
               <SessionStat label="Energy delivered" value={`${energyDeliveredWh.toFixed(3)} Wh`} />
               <SessionStat label="BMS SOC" value={state.soc != null ? `${Math.round(state.soc)}% live` : 'Waiting'} />
               <SessionStat label="Vehicle voltage" value={state.voltage != null ? `${state.voltage.toFixed(2)} V` : '—'} />
-              <SessionStat
-                label="Station voltage"
-                value={state.stationVoltage != null ? `${state.stationVoltage.toFixed(2)} V` : '—'}
-              />
               <SessionStat label="Current" value={state.current != null ? `${state.current.toFixed(2)} A` : '—'} />
             </div>
           </div>
-
-          {criticalPaused ? (
-            <InfoNote tone="warning" title="Charging paused">
-              Battery is critically overheated. Charging will resume automatically once the temperature drops back
-              to a safe range.
-            </InfoNote>
-          ) : (
-            overheatWarn && (
-              <InfoNote tone="warning" title="Fast charging unavailable">
-                Battery is overheated. Charging continues in normal mode; fast charging is disabled until the
-                temperature drops below {THERMAL_LIMITS.WARN_TEMP}°C.
-              </InfoNote>
-            )
-          )}
 
           <div className="charge-grid-2">
             <div className="card">
@@ -132,11 +112,7 @@ export default function Charging() {
                     key={m}
                     type="button"
                     className={`mode-tab ${charging.mode === m ? 'active' : ''}`}
-                    disabled={
-                      m === 'complete' ||
-                      criticalPaused ||
-                      (m === 'fast' && (!charging.coilAligned || !tempSafe))
-                    }
+                    disabled={m === 'complete' || (m === 'fast' && !charging.coilAligned)}
                     onClick={() => dispatch({ type: 'SET_CHARGING_MODE', mode: m })}
                   >
                     {m[0].toUpperCase() + m.slice(1)}
@@ -170,7 +146,7 @@ export default function Charging() {
             <button
               type="button"
               className="btn btn-disabled btn-block"
-              disabled={charging.active || criticalPaused}
+              disabled={charging.active}
               onClick={() => dispatch({ type: 'TOGGLE_CHARGING_ACTIVE' })}
             >
               ▶ Start Charging

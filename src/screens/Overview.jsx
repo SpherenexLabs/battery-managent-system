@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { computeAlerts, DIRECTION_LABEL, useEvDispatch, useEvState } from '../state/store.js';
 import { THERMAL_LIMITS } from '../state/store.js';
-import { PageHeader, InfoNote, Sparkline, StatusDot } from '../components/ui.jsx';
+import { PageHeader, Sparkline, StatusDot } from '../components/ui.jsx';
 import {
   IconBattery,
   IconBolt,
@@ -14,7 +14,6 @@ import {
   IconThermo,
   IconWarning,
 } from '../components/icons.jsx';
-import { setCooling } from '../state/bms.js';
 import { formatClock } from '../utils/format.js';
 
 const STATION_META = {
@@ -26,22 +25,11 @@ const STATION_META = {
 
 const VEHICLE_LABEL = { idle: 'Idle', moving: 'Moving', arrived: 'Arrived', charging: 'Charging' };
 
-const THERMAL_ALERT_IDS = new Set([
-  'overheat',
-  'critical-temp',
-  'rapid-temperature-rise',
-  'repeated-overheat',
-  'frequent-cooling',
-  'heater-pwm-high',
-]);
-
 const ALERT_TITLES = {
   overheat: 'Battery Temp is High',
   'critical-temp': 'Battery Temp is Critical',
   'rapid-temperature-rise': 'Battery Temp is High',
   'repeated-overheat': 'Battery Temp is High',
-  'frequent-cooling': 'Cooling Running Frequently',
-  'heater-pwm-high': 'Heating Level Too High',
   'low-battery': 'Low Battery',
   'voltage-drop': 'Voltage Instability',
   'current-swing': 'Current Instability',
@@ -71,7 +59,6 @@ function chargeStateLabel(state) {
 export default function Overview() {
   const state = useEvState();
   const dispatch = useEvDispatch();
-  const lowBattery = state.soc != null && state.soc <= THERMAL_LIMITS.LOW_SOC_THRESHOLD;
   const overheated = state.temperature != null && state.temperature >= THERMAL_LIMITS.WARN_TEMP;
   const activeAlerts = computeAlerts(state).filter((alert) => alert.status === 'active');
   const [popupAlert, setPopupAlert] = useState(null);
@@ -114,7 +101,11 @@ export default function Overview() {
 
   const soh = healthCondition(state.soh);
   const chargeState = chargeStateLabel(state);
-  const nearestStations = state.stations.slice(0, 3);
+  // Stations are already sorted nearest-first; prefer ones with a free bay.
+  const nearestStations = [...state.stations]
+    .sort((a, b) => (b.status === 'available') - (a.status === 'available'))
+    .slice(0, 3);
+  const nearestStation = nearestStations[0];
 
   return (
     <div className="screen">
@@ -124,6 +115,12 @@ export default function Overview() {
           <div>
             <strong>Battery Alert</strong>
             <p>{popupAlert.label}</p>
+            {popupAlert.id === 'low-battery' && nearestStation && (
+              <p>
+                Nearest charging station: <strong>{nearestStation.name}</strong>
+                {nearestStation.distance != null ? ` (${nearestStation.distance.toFixed(1)} km)` : ''}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -161,13 +158,6 @@ export default function Overview() {
           icon={<IconBolt />}
         />
         <MetricCard
-          label="Station Voltage"
-          value={state.stationVoltage != null ? `${state.stationVoltage.toFixed(2)} V` : '—'}
-          sub="Voltage2"
-          tone="info"
-          icon={<IconStation />}
-        />
-        <MetricCard
           label="Current"
           value={state.current != null ? `${state.current.toFixed(2)} A` : '—'}
           tone="info"
@@ -195,8 +185,6 @@ export default function Overview() {
         ) : (
           <div className="alert-item-list">
             {activeAlerts.map((alert) => {
-              const isThermal = THERMAL_ALERT_IDS.has(alert.id);
-              const manualMode = state.cooling.mode === 'manual';
               const startedAt = state.alertTimestamps[alert.id];
               return (
                 <div key={alert.id} className={`alert-item ${alert.severity}`}>
@@ -209,51 +197,9 @@ export default function Overview() {
                     {startedAt && <span className="alert-item-time">{formatClock(new Date(startedAt))}</span>}
                   </div>
 
-                  {isThermal && (
-                    <div className="alert-item-controls">
-                      <div className="mode-toggle">
-                        <span className="muted small">Mode</span>
-                        <label>
-                          <input
-                            type="radio"
-                            checked={!manualMode}
-                            onChange={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'automatic' })}
-                          />
-                          Automatic
-                        </label>
-                        <label>
-                          <input
-                            type="radio"
-                            checked={manualMode}
-                            onChange={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'manual' })}
-                          />
-                          Manual
-                        </label>
-                      </div>
-                      <div className="alert-item-buttons">
-                        <button
-                          type="button"
-                          className="btn btn-accent"
-                          disabled={!manualMode || (!!state.pumpRelay && !!state.fanRelay)}
-                          onClick={() => setCooling(true)}
-                        >
-                          Turn ON Cooling
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-outline"
-                          disabled={!manualMode || (!state.pumpRelay && !state.fanRelay)}
-                          onClick={() => setCooling(false)}
-                        >
-                          Turn OFF Cooling
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
                   {alert.id === 'low-battery' && (
                     <div className="alert-item-stations">
-                      <span className="muted small">Nearest charging stations</span>
+                      <span className="muted small">Nearest charging stations (free bays first)</span>
                       <div className="alert-station-list">
                         {nearestStations.map((station) => {
                           const meta = STATION_META[station.status];
@@ -350,55 +296,6 @@ export default function Overview() {
             <strong>{`${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}</strong>
           </div>
         </div>
-      </div>
-
-      <div className="vehicle-hero">
-        <div className="vehicle-hero-road" />
-        <div className="vehicle-hero-car">
-          <IconCar width="72" height="72" />
-        </div>
-      </div>
-
-      {lowBattery && (
-        <InfoNote tone="warning" title="Low battery">
-          <div className="low-battery-row">
-            <span>Battery running low. Please find the nearby charging station to continue your peaceful journey.</span>
-            <button type="button" className="btn btn-accent" onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}>
-              Choose charging station →
-            </button>
-          </div>
-        </InfoNote>
-      )}
-
-      {overheated && (
-        <InfoNote tone="warning" title="Battery overheated">
-          <div className="low-battery-row">
-            <span>Battery is overheated. Please turn on thermal cooling.</span>
-            <button type="button" className="btn btn-accent" onClick={() => dispatch({ type: 'GO_TO', screen: 'thermal' })}>
-              Open thermal control →
-            </button>
-          </div>
-        </InfoNote>
-      )}
-
-      <div className="station-strip">
-        {state.stations.map((s) => {
-          const meta = STATION_META[s.status];
-          return (
-            <button
-              key={s.id}
-              type="button"
-              className="station-chip"
-              onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
-            >
-              <span className="station-chip-id">S{s.id}</span>
-              <span>
-                <strong>{s.name}</strong>
-                <StatusDot color={meta.color} label={`${s.availableSlots}/${s.totalSlots} slots free`} />
-              </span>
-            </button>
-          );
-        })}
       </div>
 
       <p className="last-update">

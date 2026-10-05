@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
-import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS, THERMAL_LIMITS } from './store.js';
-import { setCooling, setDirection, setHeat, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
+import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS } from './store.js';
+import { setDirection, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
 
 function getInitialState() {
   const hash = window.location.hash.slice(1);
@@ -61,34 +61,6 @@ export function EvProvider({ children }) {
     );
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
-
-  // Automatic cooling: engage the coolant pump (Relay1) and the fan (Relay2)
-  // once the battery goes above its cooling threshold OR the heating level
-  // crosses its safety threshold; release both only when every signal is back
-  // in range, with hysteresis on temperature so the relays cannot chatter.
-  useEffect(() => {
-    if (state.cooling.mode !== 'automatic') return;
-    const tempHot = state.temperature != null && state.temperature > THERMAL_LIMITS.COOLING_ON_TEMP;
-    const tempSafe = state.temperature == null || state.temperature <= THERMAL_LIMITS.COOLING_OFF_TEMP;
-    const heatHot = state.heatPercent >= THERMAL_LIMITS.HEAT_SAFETY_THRESHOLD;
-    const heatSafe = state.heatPercent < THERMAL_LIMITS.HEAT_SAFETY_THRESHOLD;
-    const coolingOn = state.pumpRelay === 1 && state.fanRelay === 1;
-    const coolingOff = state.pumpRelay === 0 && state.fanRelay === 0;
-    if ((tempHot || heatHot) && !coolingOn) {
-      setCooling(true);
-    } else if (tempSafe && heatSafe && !coolingOff) {
-      setCooling(false);
-    }
-  }, [state.cooling.mode, state.temperature, state.heatPercent, state.pumpRelay, state.fanRelay]);
-
-  // Safety cut-off: force the artificial heating off once the battery reaches
-  // its safety temperature limit, regardless of the operator's manual setting.
-  useEffect(() => {
-    if (state.temperature == null) return;
-    if (state.temperature >= THERMAL_LIMITS.WARN_TEMP && state.heatPercent > 0) {
-      setHeat(0);
-    }
-  }, [state.temperature, state.heatPercent]);
 
   useEffect(() => {
     const onHashChange = () => {
