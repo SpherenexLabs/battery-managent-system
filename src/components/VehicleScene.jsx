@@ -277,10 +277,11 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
       } else {
         // Respond to the live command exactly as the controller would.
         const d = live.direction;
-        const wanted = d === 'F' ? DRIVE_SPEED : d === 'B' ? -DRIVE_SPEED : 0;
+        const speedScale = live.driveMode === 'auto' ? Math.max(0, Math.min(100, live.speed ?? 0)) / 100 : 1;
+        const wanted = d === 'F' ? DRIVE_SPEED * speedScale : d === 'B' ? -DRIVE_SPEED * speedScale : 0;
         drive.speed += (wanted - drive.speed) * Math.min(1, dt * ACCEL);
-        if (d === 'L') drive.heading += TURN_RATE * dt;
-        if (d === 'R') drive.heading -= TURN_RATE * dt;
+        if (d === 'L') drive.heading += TURN_RATE * speedScale * dt;
+        if (d === 'R') drive.heading -= TURN_RATE * speedScale * dt;
 
         drive.x += Math.sin(drive.heading) * drive.speed * dt;
         drive.z += Math.cos(drive.heading) * drive.speed * dt;

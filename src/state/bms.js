@@ -1,4 +1,4 @@
-import { onValue, ref, remove, set } from 'firebase/database';
+import { onValue, ref, remove, set, update } from 'firebase/database';
 import { database } from '../firebase.js';
 
 // Live telemetry node published by the vehicle controller.
@@ -28,10 +28,19 @@ export function subscribeConnection(callback) {
 
 // F = forward, B = backward, L = left, R = right, S = stop.
 export const DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
+const normalizeSpeed = (speed) => Math.max(0, Math.min(100, Math.round((Number(speed) || 0) / 10) * 10));
 
 export function setDirection(direction) {
   const value = DIRECTIONS.includes(direction) ? direction : 'S';
   return set(ref(database, `${BMS_PATH}/direction`), value);
+}
+
+// Auto mode writes direction and speed atomically so route playback cannot
+// briefly combine a new direction with the previous step's speed.
+export function setDriveCommand(direction, speed) {
+  const value = DIRECTIONS.includes(direction) ? direction : 'S';
+  const normalizedSpeed = value === 'S' ? 0 : normalizeSpeed(speed);
+  return update(ref(database, BMS_PATH), { direction: value, Speed: normalizedSpeed });
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +87,17 @@ export function subscribeRoutes(callback) {
     const routes = Object.entries(value).map(([id, route]) => ({
       id,
       name: route?.name ?? id,
-      steps: Array.isArray(route?.steps) ? route.steps : [],
+      steps: Array.isArray(route?.steps)
+        ? route.steps.map((step) => ({
+            ...step,
+            speed:
+              step?.direction === 'S'
+                ? 0
+                : typeof step?.speed === 'number'
+                  ? normalizeSpeed(step.speed)
+                  : 50,
+          }))
+        : [],
       updatedAt: route?.updatedAt ?? null,
     }));
     routes.sort((a, b) => a.name.localeCompare(b.name));
@@ -91,7 +110,11 @@ export function subscribeRoutes(callback) {
 export function saveRoute(route) {
   return set(ref(database, `${ROUTES_PATH}/${route.id}`), {
     name: route.name,
-    steps: route.steps.map((step) => ({ direction: step.direction, seconds: step.seconds })),
+    steps: route.steps.map((step) => ({
+      direction: step.direction,
+      speed: step.direction === 'S' ? 0 : normalizeSpeed(step.speed),
+      seconds: step.seconds,
+    })),
     updatedAt: Date.now(),
   });
 }

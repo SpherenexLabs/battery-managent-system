@@ -195,7 +195,7 @@ export default function Stations() {
                       <span className="route-chip-row">
                         {route.steps.map((step, i) => (
                           <span key={`${route.id}-${i}`} className="route-chip">
-                            {step.direction} {step.seconds}s
+                            {step.direction} {step.speed ?? 50}% · {step.seconds}s
                           </span>
                         ))}
                       </span>
