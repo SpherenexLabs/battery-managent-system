@@ -1,4 +1,4 @@
-import { AUTO_SPEED_BY_DIRECTION, routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
+import { routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote, StatusDot, Card } from '../components/ui.jsx';
 import { IconBolt, IconCheck, IconPulse, IconStation, IconTarget } from '../components/icons.jsx';
 import { setStationOccupied } from '../state/bms.js';
@@ -195,7 +195,7 @@ export default function Stations() {
                       <span className="route-chip-row">
                         {route.steps.map((step, i) => (
                           <span key={`${route.id}-${i}`} className="route-chip">
-                            {step.direction} {AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% · {step.seconds}s
+                            {step.direction} {step.seconds}s
                           </span>
                         ))}
                       </span>

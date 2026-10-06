@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS } from './store.js';
-import { setDirection, setDriveCommand, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
+import { setDirection, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
 
 function getInitialState() {
   const hash = window.location.hash.slice(1);
@@ -36,8 +36,7 @@ export function EvProvider({ children }) {
   // stop — is written to the controller here, so no screen writes it directly.
   useEffect(() => {
     if (state.command == null) return;
-    if (typeof state.command.speed === 'number') setDriveCommand(state.command.direction, state.command.speed);
-    else setDirection(state.command.direction);
+    setDirection(state.command.direction);
   }, [state.command]);
 
   // Auto-route playback clock. One tick a second while a route is running;

@@ -35,17 +35,9 @@ export const THERMAL_LIMITS = {
 export const DIRECTION_LABEL = {
   F: 'Forward',
   B: 'Backward',
-  L: 'Right',
   R: 'Left',
+  L: 'Right',
   S: 'Stopped',
-};
-
-export const AUTO_SPEED_BY_DIRECTION = {
-  F: 80,
-  B: 80,
-  L: 100,
-  R: 100,
-  S: 0,
 };
 
 export function getChargingPower(state) {
@@ -60,21 +52,10 @@ const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 // Issues a drive command. The bumped sequence number gives every command a
 // fresh identity, so re-sending the same direction still reaches the device.
-const routeStepSpeed = (step) => AUTO_SPEED_BY_DIRECTION[step?.direction] ?? 0;
-
-const withCommand = (state, direction, speed) => {
-  const hasSpeed = Number.isFinite(speed);
-  const normalizedSpeed = hasSpeed ? (AUTO_SPEED_BY_DIRECTION[direction] ?? 0) : null;
-  return {
-    command: {
-      direction,
-      ...(normalizedSpeed == null ? {} : { speed: normalizedSpeed }),
-      seq: state.commandSeq + 1,
-    },
-    commandSeq: state.commandSeq + 1,
-    ...(normalizedSpeed == null ? {} : { speed: normalizedSpeed }),
-  };
-};
+const withCommand = (state, direction) => ({
+  command: { direction, seq: state.commandSeq + 1 },
+  commandSeq: state.commandSeq + 1,
+});
 
 export const stepsTotalSeconds = (steps) => steps.reduce((sum, s) => sum + s.seconds, 0);
 export const routeTotalSeconds = (route) => stepsTotalSeconds(route.steps);
@@ -336,8 +317,7 @@ export const initialState = {
   pumpRelay: 0, // Relay1 — coolant pump
   fanRelay: 0, // Relay2 — cooling fan
   heatPercent: 0, // Heat — artificial heating level, 0-100 %
-  direction: 'S', // F = forward, B = backward, R = left, L = right, S = stop
-  speed: 0, // Speed = motor speed percentage, 0-100
+  direction: 'S', // F = forward, B = backward, L = left, R = right, S = stop
   driveMode: 'manual', // manual | auto
   slots: [-1, -1, -1, -1],
 
@@ -435,7 +415,6 @@ function reducerInner(state, action) {
       const fanRelay = typeof d.Relay2 === 'number' ? (d.Relay2 > 0 ? 1 : 0) : state.fanRelay;
       const heatPercent = typeof d.Heat === 'number' ? clamp(Math.round(d.Heat), 0, 100) : state.heatPercent;
       const direction = typeof d.direction === 'string' && DIRECTION_LABEL[d.direction] ? d.direction : state.direction;
-      const speed = typeof d.Speed === 'number' ? clamp(Math.round(d.Speed), 0, 100) : state.speed;
       const socSignal = typeof d.SOC === 'number' ? (d.SOC > 0 ? 1 : 0) : state.socSignal;
       const sodSignal = typeof d.SOD === 'number' ? (d.SOD > 0 ? 1 : 0) : state.sodSignal;
       const socCount = typeof d.Count === 'number' ? d.Count : state.socCount;
@@ -526,7 +505,6 @@ function reducerInner(state, action) {
         fanRelay,
         heatPercent,
         direction,
-        speed,
         socSignal,
         sodSignal,
         socCount,
@@ -576,7 +554,7 @@ function reducerInner(state, action) {
         return {
           ...base,
           playback: null,
-          ...withCommand(state, 'S', 0),
+          ...withCommand(state, 'S'),
           eventLog: pushLog(base.eventLog, 'Auto route cancelled — switched to manual.'),
         };
       }
@@ -586,12 +564,9 @@ function reducerInner(state, action) {
     case 'SEND_DIRECTION':
       return {
         ...state,
-        ...withCommand(state, action.direction, action.speed),
+        ...withCommand(state, action.direction),
         eventLog: action.log
-          ? pushLog(
-              state.eventLog,
-              `${action.log}: ${DIRECTION_LABEL[action.direction]} (${action.direction})${Number.isFinite(action.speed) ? ` at ${Math.round(action.speed)}% speed` : ''}.`
-            )
+          ? pushLog(state.eventLog, `${action.log}: ${DIRECTION_LABEL[action.direction]} (${action.direction}).`)
           : state.eventLog,
       };
 
@@ -612,7 +587,7 @@ function reducerInner(state, action) {
         ...state,
         driveMode: 'auto',
         playback: startPlayback(route.steps, { kind: 'route', routeId: route.id, label: route.name }),
-        ...withCommand(state, route.steps[0].direction, routeStepSpeed(route.steps[0])),
+        ...withCommand(state, route.steps[0].direction),
         eventLog: pushLog(state.eventLog, `Auto route "${route.name}" started.`),
       };
     }
@@ -627,7 +602,7 @@ function reducerInner(state, action) {
         ...state,
         driveMode: 'auto',
         playback: startPlayback(steps, { kind: 'test', label }),
-        ...withCommand(state, steps[0].direction, routeStepSpeed(steps[0])),
+        ...withCommand(state, steps[0].direction),
         eventLog: pushLog(
           state.eventLog,
           `Testing ${label} — ${steps.length} step${steps.length === 1 ? '' : 's'}, ${stepsTotalSeconds(steps)}s.`
@@ -638,7 +613,7 @@ function reducerInner(state, action) {
     case 'PLAYBACK_TICK': {
       if (!state.playback) return state;
       const { steps, stepIndex, remaining, kind, label } = state.playback;
-      if (!steps || steps.length === 0) return { ...state, playback: null, ...withCommand(state, 'S', 0) };
+      if (!steps || steps.length === 0) return { ...state, playback: null, ...withCommand(state, 'S') };
 
       // Still inside the current step — just count it down.
       if (remaining > 1) {
@@ -658,7 +633,7 @@ function reducerInner(state, action) {
           ...state,
           playback: null,
           navProgress: kind === 'route' ? 100 : state.navProgress,
-          ...withCommand(state, 'S', 0),
+          ...withCommand(state, 'S'),
           vehicleStatus: arriving ? 'arrived' : state.vehicleStatus,
           routeSteps: arriving ? { ...state.routeSteps, followingTrack: false, arrived: true } : state.routeSteps,
           eventLog: pushLog(
@@ -678,7 +653,7 @@ function reducerInner(state, action) {
         playback,
         navProgress:
           kind === 'route' ? stepsProgress(steps, playback.stepIndex, playback.remaining) : state.navProgress,
-        ...withCommand(state, nextStep.direction, routeStepSpeed(nextStep)),
+        ...withCommand(state, nextStep.direction),
       };
     }
 
@@ -689,7 +664,7 @@ function reducerInner(state, action) {
       return {
         ...state,
         playback: null,
-        ...withCommand(state, 'S', 0),
+        ...withCommand(state, 'S'),
         routeSteps: kind === 'route' ? { ...state.routeSteps, followingTrack: false } : state.routeSteps,
         eventLog: pushLog(
           state.eventLog,
@@ -705,7 +680,7 @@ function reducerInner(state, action) {
         navStopped: true,
         playback: null,
         routeSteps: { ...state.routeSteps, followingTrack: false },
-        ...withCommand(state, 'S', 0),
+        ...withCommand(state, 'S'),
         eventLog: pushLog(
           state.eventLog,
           state.vehicleStatus === 'moving'
@@ -740,7 +715,7 @@ function reducerInner(state, action) {
         navStopped: false,
         screen: 'navigation',
         playback: startPlayback(route.steps, { kind: 'route', routeId: route.id, label: route.name }),
-        ...withCommand(state, route.steps[0].direction, routeStepSpeed(route.steps[0])),
+        ...withCommand(state, route.steps[0].direction),
         eventLog: pushLog(
           state.eventLog,
           `Reservation confirmed for Station ${station.id} — playing auto route "${route.name}".`

@@ -1,4 +1,4 @@
-import { onValue, ref, remove, set, update } from 'firebase/database';
+import { onValue, ref, remove, set } from 'firebase/database';
 import { database } from '../firebase.js';
 
 // Live telemetry node published by the vehicle controller.
@@ -26,21 +26,12 @@ export function subscribeConnection(callback) {
 // Drive commands
 // ---------------------------------------------------------------------------
 
-// F = forward, B = backward, R = left, L = right, S = stop.
+// F = forward, B = backward, L = left, R = right, S = stop.
 export const DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
-const autoSpeedForDirection = (direction) => ({ F: 80, B: 80, L: 100, R: 100, S: 0 })[direction] ?? 0;
 
 export function setDirection(direction) {
   const value = DIRECTIONS.includes(direction) ? direction : 'S';
   return set(ref(database, `${BMS_PATH}/direction`), value);
-}
-
-// Auto mode writes direction and speed atomically so route playback cannot
-// briefly combine a new direction with the previous step's speed.
-export function setDriveCommand(direction) {
-  const value = DIRECTIONS.includes(direction) ? direction : 'S';
-  const normalizedSpeed = autoSpeedForDirection(value);
-  return update(ref(database, BMS_PATH), { direction: value, Speed: normalizedSpeed });
 }
 
 // ---------------------------------------------------------------------------
@@ -87,12 +78,7 @@ export function subscribeRoutes(callback) {
     const routes = Object.entries(value).map(([id, route]) => ({
       id,
       name: route?.name ?? id,
-      steps: Array.isArray(route?.steps)
-        ? route.steps.map((step) => ({
-            ...step,
-            speed: autoSpeedForDirection(step?.direction),
-          }))
-        : [],
+      steps: Array.isArray(route?.steps) ? route.steps : [],
       updatedAt: route?.updatedAt ?? null,
     }));
     routes.sort((a, b) => a.name.localeCompare(b.name));
@@ -105,11 +91,7 @@ export function subscribeRoutes(callback) {
 export function saveRoute(route) {
   return set(ref(database, `${ROUTES_PATH}/${route.id}`), {
     name: route.name,
-    steps: route.steps.map((step) => ({
-      direction: step.direction,
-      speed: autoSpeedForDirection(step.direction),
-      seconds: step.seconds,
-    })),
+    steps: route.steps.map((step) => ({ direction: step.direction, seconds: step.seconds })),
     updatedAt: Date.now(),
   });
 }

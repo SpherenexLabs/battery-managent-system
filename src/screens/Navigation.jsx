@@ -1,24 +1,27 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AUTO_SPEED_BY_DIRECTION,
-  DIRECTION_LABEL,
-  routeTotalSeconds,
-  useEvDispatch,
-  useEvState,
-} from '../state/store.js';
+import { useMemo, useState } from 'react';
+import { DIRECTION_LABEL, routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote } from '../components/ui.jsx';
 import { IconBolt, IconCar, IconCheck, IconList, IconStop, IconTarget } from '../components/icons.jsx';
 import { deleteRoute, saveRoute } from '../state/bms.js';
 import { bearingDeg, compassLabel, distanceKm } from '../utils/geo.js';
 import Scene3D from '../components/Scene3D.jsx';
 
+// Joystick layout: forward on top, left / stop / right in the middle,
+// backward underneath. Each cell sends its own single-letter command.
+const PAD_LAYOUT = [
+  [null, 'F', null],
+  ['L', 'S', 'R'],
+  [null, 'B', null],
+];
+
+const PAD_GLYPH = { F: '▲', B: '▼', L: '◀', R: '▶', S: '■' };
+
 const STEP_DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
 
 const MIN_STEP_SECONDS = 1;
 const MAX_STEP_SECONDS = 600;
-const clockNow = () => Date.now();
 
-const emptyDraft = () => ({ id: null, name: '', steps: [] });
+const emptyDraft = () => ({ id: null, name: '', steps: [{ direction: 'F', seconds: 5 }] });
 
 export default function Navigation() {
   const state = useEvState();
@@ -30,10 +33,7 @@ export default function Navigation() {
   const { routes, routesLoaded, playback } = state;
   const manual = state.driveMode === 'manual';
 
-  const sendDirection = useCallback(
-    (direction, speed, log) => dispatch({ type: 'SEND_DIRECTION', direction, speed, log }),
-    [dispatch]
-  );
+  const sendDirection = (direction, log) => dispatch({ type: 'SEND_DIRECTION', direction, log });
 
   // Sends steps to the vehicle right now, without saving them, so a timing can
   // be checked against the real hardware before it is committed to a route.
@@ -138,7 +138,6 @@ export default function Navigation() {
             <IconTarget />
             <span>
               Live command: {DIRECTION_LABEL[state.direction]} ({state.direction})
-              {!manual && ` · ${state.speed}% speed`}
             </span>
           </div>
         </div>
@@ -173,7 +172,7 @@ export default function Navigation() {
         )}
 
         {manual ? (
-          <ManualPad direction={state.direction} onCommand={(d) => sendDirection(d, undefined, 'Manual command')} />
+          <ManualPad direction={state.direction} onCommand={(d) => sendDirection(d, 'Manual command')} />
         ) : (
           <AutoPanel
             routes={routes}
@@ -187,13 +186,13 @@ export default function Navigation() {
             onSave={submitDraft}
             onDelete={removeRoute}
             onTest={testSteps}
-            onCommand={sendDirection}
           />
         )}
 
         <InfoNote>
-          Every direction is written to <code>BMS_5578/direction</code>. In Auto mode, Forward and Backward use
-          80% speed, Left and Right use 100%, and Stop uses 0%. Routes replay each saved direction and duration.
+          Every command is written straight to <code>BMS_5578/direction</code> as a single letter — F forward,
+          B backward, L left, R right, S stop. An auto route sends each step's letter and holds it for that
+          step's duration before moving on.
         </InfoNote>
       </div>
 
@@ -213,12 +212,6 @@ export default function Navigation() {
             <span>Drive mode</span>
             <strong>{manual ? 'Manual' : 'Auto'}</strong>
           </div>
-          {!manual && (
-            <div className="kv-row">
-              <span>Motor speed</span>
-              <strong>{state.speed}%</strong>
-            </div>
-          )}
           <div className="kv-row">
             <span>Distance to {targetStation ? targetStation.name : 'station'}</span>
             <strong>{liveDirection ? `${liveDirection.km.toFixed(2)} km` : '—'}</strong>
@@ -292,130 +285,33 @@ function ManualPad({ direction, onCommand }) {
   return (
     <div className="card joystick-card">
       <h3 className="card-title">Manual Joystick</h3>
-      <p className="muted small">Drag and hold the knob to drive. Releasing it returns to the center and stops the vehicle.</p>
+      <p className="muted small">Each button sends its letter to the controller and stays latched until you send another.</p>
 
-      <CircularJoystick
-        activeDirection={direction === 'S' ? null : direction}
-        onDirectionChange={(nextDirection) => onCommand(nextDirection)}
-        onRelease={() => onCommand('S')}
-        label="Manual vehicle joystick"
-      />
+      <div className="joystick-pad">
+        {PAD_LAYOUT.flat().map((cmd, i) =>
+          cmd == null ? (
+            <span key={`gap-${i}`} className="joystick-gap" />
+          ) : (
+            <button
+              key={cmd}
+              type="button"
+              className={`joystick-btn cmd-${cmd} ${direction === cmd ? 'active' : ''}`}
+              onClick={() => onCommand(cmd)}
+              aria-pressed={direction === cmd}
+            >
+              <span className="joystick-glyph">{PAD_GLYPH[cmd]}</span>
+              <span className="joystick-label">{DIRECTION_LABEL[cmd]}</span>
+              <span className="joystick-code">{cmd}</span>
+            </button>
+          )
+        )}
+      </div>
 
       <div className="joystick-readout">
         <span className="muted">Currently sending</span>
         <strong>
           {DIRECTION_LABEL[direction]} ({direction})
         </strong>
-      </div>
-    </div>
-  );
-}
-
-function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onRelease, disabled = false, label }) {
-  const baseRef = useRef(null);
-  const draggingRef = useRef(false);
-  const directionRef = useRef(null);
-  const speedRef = useRef(0);
-  const [knobPosition, setKnobPosition] = useState({ x: 0, y: 0 });
-
-  function setDirectionFromPoint(clientX, clientY) {
-    const rect = baseRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const x = clientX - (rect.left + rect.width / 2);
-    const y = clientY - (rect.top + rect.height / 2);
-    const distance = Math.hypot(x, y);
-    const maxTravel = Math.min(rect.width, rect.height) * 0.3;
-    const scale = distance > maxTravel ? maxTravel / distance : 1;
-    setKnobPosition({ x: x * scale, y: y * scale });
-
-    const deadZone = Math.min(rect.width, rect.height) * 0.1;
-    const nextDirection =
-      distance < deadZone ? null : Math.abs(x) > Math.abs(y) ? (x > 0 ? 'L' : 'R') : y > 0 ? 'B' : 'F';
-    const nextSpeed = nextDirection
-      ? Math.min(100, Math.max(0, Math.round(((distance - deadZone) / (maxTravel - deadZone)) * 10) * 10))
-      : 0;
-
-    if (nextDirection === directionRef.current && nextSpeed === speedRef.current) return;
-    const wasMoving = directionRef.current != null;
-    directionRef.current = nextDirection;
-    speedRef.current = nextSpeed;
-    if (nextDirection) onDirectionChange(nextDirection, nextSpeed);
-    else if (wasMoving) onRelease();
-  }
-
-  function releaseJoystick() {
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
-    setKnobPosition({ x: 0, y: 0 });
-    if (directionRef.current) onRelease();
-    directionRef.current = null;
-    speedRef.current = 0;
-  }
-
-  function keyboardDirection(direction) {
-    if (disabled || directionRef.current === direction) return;
-    directionRef.current = direction;
-    speedRef.current = 100;
-    const rect = baseRef.current?.getBoundingClientRect();
-    const offset = rect ? Math.min(rect.width, rect.height) * 0.3 : 68;
-    const positions = {
-      F: { x: 0, y: -offset },
-      B: { x: 0, y: offset },
-      L: { x: offset, y: 0 },
-      R: { x: -offset, y: 0 },
-    };
-    setKnobPosition(positions[direction]);
-    onDirectionChange(direction, 100);
-  }
-
-  return (
-    <div
-      ref={baseRef}
-      className={`circular-joystick ${disabled ? 'disabled' : ''}`}
-      role="application"
-      tabIndex={disabled ? -1 : 0}
-      aria-label={label}
-      onPointerDown={(event) => {
-        if (disabled || event.button !== 0) return;
-        event.preventDefault();
-        draggingRef.current = true;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        setDirectionFromPoint(event.clientX, event.clientY);
-      }}
-      onPointerMove={(event) => {
-        if (!draggingRef.current) return;
-        event.preventDefault();
-        setDirectionFromPoint(event.clientX, event.clientY);
-      }}
-      onPointerUp={releaseJoystick}
-      onPointerCancel={releaseJoystick}
-      onKeyDown={(event) => {
-        const keys = { ArrowUp: 'F', ArrowDown: 'B', ArrowLeft: 'R', ArrowRight: 'L' };
-        const nextDirection = keys[event.key];
-        if (!nextDirection || event.repeat) return;
-        event.preventDefault();
-        keyboardDirection(nextDirection);
-      }}
-      onKeyUp={(event) => {
-        if (!event.key.startsWith('Arrow')) return;
-        event.preventDefault();
-        directionRef.current = null;
-        speedRef.current = 0;
-        setKnobPosition({ x: 0, y: 0 });
-        onRelease();
-      }}
-    >
-      <span className="joystick-axis axis-forward">F</span>
-      <span className="joystick-axis axis-left">R</span>
-      <span className="joystick-axis axis-right">L</span>
-      <span className="joystick-axis axis-backward">B</span>
-      <div className="joystick-ring" />
-      <div
-        className={`joystick-knob ${activeDirection ? 'active' : ''}`}
-        style={{ transform: `translate(${knobPosition.x}px, ${knobPosition.y}px)` }}
-      >
-        <span>{activeDirection ? `${activeDirection}${activeSpeed == null ? '' : ` ${activeSpeed}%`}` : 'S'}</span>
       </div>
     </div>
   );
@@ -433,7 +329,6 @@ function AutoPanel({
   onSave,
   onDelete,
   onTest,
-  onCommand,
 }) {
   return (
     <div className="auto-panel">
@@ -453,8 +348,7 @@ function AutoPanel({
               Step {playback.stepIndex + 1} / {playback.steps.length}
             </span>
             <strong>
-              {DIRECTION_LABEL[activeStep.direction]} ({activeStep.direction}) at{' '}
-              {AUTO_SPEED_BY_DIRECTION[activeStep.direction] ?? 0}%
+              {DIRECTION_LABEL[activeStep.direction]} ({activeStep.direction})
             </strong>
             <span className="route-countdown">{playback.remaining}s left</span>
           </div>
@@ -464,7 +358,7 @@ function AutoPanel({
                 key={`${step.direction}-${i}`}
                 className={i < playback.stepIndex ? 'done' : i === playback.stepIndex ? 'current' : ''}
               >
-                {step.direction} · {AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% · {step.seconds}s
+                {step.direction} · {step.seconds}s
               </li>
             ))}
           </ol>
@@ -506,7 +400,7 @@ function AutoPanel({
                     <div className="route-chip-row">
                       {route.steps.map((step, i) => (
                         <span key={`${route.id}-${i}`} className="route-chip">
-                          {step.direction} {AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% · {step.seconds}s
+                          {step.direction} {step.seconds}s
                         </span>
                       ))}
                     </div>
@@ -548,112 +442,17 @@ function AutoPanel({
           onTest={onTest}
           onStop={onStop}
           playback={playback}
-          onCommand={onCommand}
         />
       )}
     </div>
   );
 }
 
-function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playback, onCommand }) {
+function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playback }) {
   const total = draft.steps.reduce((sum, s) => sum + s.seconds, 0);
   const testing = playback?.kind === 'test';
   const busy = !!playback;
   const draftName = draft.name.trim() || 'unsaved route';
-  const [recording, setRecording] = useState(null);
-  const recordingRef = useRef(null);
-  const timerRef = useRef(null);
-
-  function appendRecordedStep(active, endedAt = clockNow()) {
-    const elapsedMs = Math.max(1, endedAt - active.startedAt);
-    const weightedSpeedMs = active.weightedSpeedMs + active.speed * Math.max(0, endedAt - active.sampleAt);
-    const speed = Math.max(0, Math.min(100, Math.round(weightedSpeedMs / elapsedMs / 10) * 10));
-    const seconds = Math.min(
-      MAX_STEP_SECONDS,
-      Math.max(MIN_STEP_SECONDS, Math.ceil(elapsedMs / 1000))
-    );
-    setDraft((current) => ({
-      ...current,
-      steps: [...current.steps, { direction: active.direction, speed, seconds }],
-    }));
-  }
-
-  function finishRecording(saveStep = true) {
-    const active = recordingRef.current;
-    if (!active) return;
-
-    recordingRef.current = null;
-    clearInterval(timerRef.current);
-    timerRef.current = null;
-    setRecording(null);
-    onCommand('S', 0);
-
-    if (saveStep) appendRecordedStep(active);
-  }
-
-  function startRecording(direction, speed) {
-    if (busy) return;
-    speed = AUTO_SPEED_BY_DIRECTION[direction] ?? speed;
-    const now = clockNow();
-
-    if (recordingRef.current) {
-      const current = recordingRef.current;
-      if (current.direction === direction) {
-        if (current.speed === speed) return;
-        const next = {
-          ...current,
-          speed,
-          weightedSpeedMs: current.weightedSpeedMs + current.speed * Math.max(0, now - current.sampleAt),
-          sampleAt: now,
-          elapsedMs: now - current.startedAt,
-        };
-        recordingRef.current = next;
-        setRecording(next);
-        onCommand(direction, speed);
-        return;
-      }
-
-      appendRecordedStep(current, now);
-      const next = { direction, speed, startedAt: now, sampleAt: now, weightedSpeedMs: 0, elapsedMs: 0 };
-      recordingRef.current = next;
-      setRecording(next);
-      onCommand(direction, speed, 'Route recording');
-      return;
-    }
-
-    const active = { direction, speed, startedAt: now, sampleAt: now, weightedSpeedMs: 0, elapsedMs: 0 };
-    recordingRef.current = active;
-    setRecording(active);
-    onCommand(direction, speed, 'Route recording');
-
-    timerRef.current = setInterval(() => {
-      const current = recordingRef.current;
-      if (!current) return;
-      const elapsedMs = clockNow() - current.startedAt;
-      if (elapsedMs >= MAX_STEP_SECONDS * 1000) {
-        finishRecording(true);
-        return;
-      }
-      setRecording({ ...current, elapsedMs });
-    }, 100);
-  }
-
-  function stopNow() {
-    if (recordingRef.current) finishRecording(true);
-    else onCommand('S', 0, 'Route recorder stop');
-  }
-
-  useEffect(
-    () => () => {
-      if (!recordingRef.current) return;
-      clearInterval(timerRef.current);
-      recordingRef.current = null;
-      onCommand('S', 0);
-    },
-    [onCommand]
-  );
-
-  const editorBusy = busy || !!recording;
 
   const updateStep = (index, patch) =>
     setDraft({ ...draft, steps: draft.steps.map((s, i) => (i === index ? { ...s, ...patch } : s)) });
@@ -680,48 +479,11 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
         />
       </label>
 
-      <div className="route-recorder">
-        <div className="route-recorder-copy">
-          <strong>Record with joystick</strong>
-          <span className="muted small">
-            Drag the knob to choose a direction. Forward/Backward run at 80%; Left/Right run at 100%.
-            Release to stop and record the movement.
-          </span>
-        </div>
-
-        <CircularJoystick
-          activeDirection={recording?.direction ?? null}
-          activeSpeed={recording?.speed ?? 0}
-          onDirectionChange={startRecording}
-          onRelease={() => finishRecording(true)}
-          disabled={busy}
-          label="Route recording joystick"
-        />
-
-        <div className={`route-recording-readout ${recording ? 'active' : ''}`} aria-live="polite">
-          <span>{recording ? `Moving ${DIRECTION_LABEL[recording.direction].toLowerCase()}` : 'Ready to record'}</span>
-          <strong>{recording ? `${recording.speed}% · ${(recording.elapsedMs / 1000).toFixed(1)}s` : '0% · 0.0s'}</strong>
-        </div>
-        <button type="button" className="btn btn-danger route-recorder-stop" disabled={busy} onClick={stopNow}>
-          <IconStop /> Stop
-        </button>
-      </div>
-
       <div className="route-step-editor">
-        {draft.steps.length === 0 && <p className="muted small route-empty-steps">No movements recorded yet.</p>}
         {draft.steps.map((step, i) => (
           <div key={i} className="route-step-row">
             <span className="route-step-index">{i + 1}</span>
-            <select
-              disabled={editorBusy}
-              value={step.direction}
-              onChange={(e) =>
-                updateStep(i, {
-                  direction: e.target.value,
-                  speed: AUTO_SPEED_BY_DIRECTION[e.target.value] ?? 0,
-                })
-              }
-            >
+            <select value={step.direction} onChange={(e) => updateStep(i, { direction: e.target.value })}>
               {STEP_DIRECTIONS.map((d) => (
                 <option key={d} value={d}>
                   {DIRECTION_LABEL[d]} ({d})
@@ -731,27 +493,9 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
             <div className="route-step-seconds">
               <input
                 type="number"
-                min="0"
-                max="100"
-                step="10"
-                value={AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}
-                disabled
-                aria-label={`Speed for step ${i + 1}`}
-                onChange={(e) =>
-                  updateStep(i, {
-                    speed: Math.min(100, Math.max(0, Math.round((Number(e.target.value) || 0) / 10) * 10)),
-                  })
-                }
-              />
-              <span className="muted small">%</span>
-            </div>
-            <div className="route-step-seconds">
-              <input
-                type="number"
                 min={MIN_STEP_SECONDS}
                 max={MAX_STEP_SECONDS}
                 value={step.seconds}
-                disabled={editorBusy}
                 onChange={(e) =>
                   updateStep(i, {
                     seconds: Math.min(
@@ -766,25 +510,20 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
             <button
               type="button"
               className="btn btn-outline route-step-test"
-              disabled={editorBusy}
-              title={`Send ${DIRECTION_LABEL[step.direction]} (${step.direction}) at ${AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% for ${step.seconds}s now`}
-              onClick={() =>
-                onTest(
-                  [step],
-                  `step ${i + 1} (${step.direction} ${AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% ${step.seconds}s)`
-                )
-              }
+              disabled={busy}
+              title={`Send ${DIRECTION_LABEL[step.direction]} (${step.direction}) for ${step.seconds}s now`}
+              onClick={() => onTest([step], `step ${i + 1} (${step.direction} ${step.seconds}s)`)}
             >
               ▶ Test
             </button>
             <div className="route-step-buttons">
-              <button type="button" className="icon-btn" disabled={editorBusy || i === 0} onClick={() => moveStep(i, -1)} aria-label="Move step up">
+              <button type="button" className="icon-btn" disabled={i === 0} onClick={() => moveStep(i, -1)} aria-label="Move step up">
                 ↑
               </button>
               <button
                 type="button"
                 className="icon-btn"
-                disabled={editorBusy || i === draft.steps.length - 1}
+                disabled={i === draft.steps.length - 1}
                 onClick={() => moveStep(i, 1)}
                 aria-label="Move step down"
               >
@@ -793,7 +532,6 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
               <button
                 type="button"
                 className="icon-btn danger"
-                disabled={editorBusy}
                 onClick={() => setDraft({ ...draft, steps: draft.steps.filter((_, idx) => idx !== i) })}
                 aria-label="Remove step"
               >
@@ -808,8 +546,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
         <button
           type="button"
           className="btn btn-outline"
-          disabled={editorBusy}
-          onClick={() => setDraft({ ...draft, steps: [...draft.steps, { direction: 'F', speed: 80, seconds: 5 }] })}
+          onClick={() => setDraft({ ...draft, steps: [...draft.steps, { direction: 'F', seconds: 5 }] })}
         >
           + Add step
         </button>
@@ -829,17 +566,17 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
             <IconStop /> Stop test
           </button>
         ) : (
-          <button type="button" className="btn btn-outline" disabled={editorBusy || total === 0} onClick={() => onTest(draft.steps, draftName)}>
+          <button type="button" className="btn btn-outline" disabled={busy} onClick={() => onTest(draft.steps, draftName)}>
             ▶ Test all steps ({total}s)
           </button>
         )}
       </div>
 
       <div className="route-editor-actions">
-        <button type="button" className="btn btn-accent" disabled={editorBusy} onClick={onSave}>
+        <button type="button" className="btn btn-accent" disabled={busy} onClick={onSave}>
           <IconCheck /> {draft.id ? 'Update route' : 'Save route'}
         </button>
-        <button type="button" className="btn btn-outline" disabled={!!recording} onClick={onCancel}>
+        <button type="button" className="btn btn-outline" onClick={onCancel}>
           Cancel
         </button>
       </div>
