@@ -35,8 +35,8 @@ export const THERMAL_LIMITS = {
 export const DIRECTION_LABEL = {
   F: 'Forward',
   B: 'Backward',
-  R: 'Left',
-  L: 'Right',
+  L: 'Left',
+  R: 'Right',
   S: 'Stopped',
 };
 

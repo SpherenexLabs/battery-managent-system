@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DIRECTION_LABEL, routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote } from '../components/ui.jsx';
 import { IconBolt, IconCar, IconCheck, IconList, IconStop, IconTarget } from '../components/icons.jsx';
@@ -20,8 +20,9 @@ const STEP_DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
 
 const MIN_STEP_SECONDS = 1;
 const MAX_STEP_SECONDS = 600;
+const clockNow = () => Date.now();
 
-const emptyDraft = () => ({ id: null, name: '', steps: [{ direction: 'F', seconds: 5 }] });
+const emptyDraft = () => ({ id: null, name: '', steps: [] });
 
 export default function Navigation() {
   const state = useEvState();
@@ -33,7 +34,10 @@ export default function Navigation() {
   const { routes, routesLoaded, playback } = state;
   const manual = state.driveMode === 'manual';
 
-  const sendDirection = (direction, log) => dispatch({ type: 'SEND_DIRECTION', direction, log });
+  const sendDirection = useCallback(
+    (direction, log) => dispatch({ type: 'SEND_DIRECTION', direction, log }),
+    [dispatch]
+  );
 
   // Sends steps to the vehicle right now, without saving them, so a timing can
   // be checked against the real hardware before it is committed to a route.
@@ -186,6 +190,7 @@ export default function Navigation() {
             onSave={submitDraft}
             onDelete={removeRoute}
             onTest={testSteps}
+            onCommand={sendDirection}
           />
         )}
 
@@ -329,6 +334,7 @@ function AutoPanel({
   onSave,
   onDelete,
   onTest,
+  onCommand,
 }) {
   return (
     <div className="auto-panel">
@@ -442,17 +448,78 @@ function AutoPanel({
           onTest={onTest}
           onStop={onStop}
           playback={playback}
+          onCommand={onCommand}
         />
       )}
     </div>
   );
 }
 
-function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playback }) {
+function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playback, onCommand }) {
   const total = draft.steps.reduce((sum, s) => sum + s.seconds, 0);
   const testing = playback?.kind === 'test';
   const busy = !!playback;
   const draftName = draft.name.trim() || 'unsaved route';
+  const [recording, setRecording] = useState(null);
+  const recordingRef = useRef(null);
+  const timerRef = useRef(null);
+
+  function finishRecording(saveStep = true) {
+    const active = recordingRef.current;
+    if (!active) return;
+
+    recordingRef.current = null;
+    clearInterval(timerRef.current);
+    timerRef.current = null;
+    setRecording(null);
+    onCommand('S');
+
+    if (!saveStep) return;
+    const seconds = Math.min(
+      MAX_STEP_SECONDS,
+      Math.max(MIN_STEP_SECONDS, Math.ceil((clockNow() - active.startedAt) / 1000))
+    );
+    setDraft((current) => ({
+      ...current,
+      steps: [...current.steps, { direction: active.direction, seconds }],
+    }));
+  }
+
+  function startRecording(direction) {
+    if (busy || recordingRef.current) return;
+    const active = { direction, startedAt: clockNow(), elapsedMs: 0 };
+    recordingRef.current = active;
+    setRecording(active);
+    onCommand(direction, 'Route recording');
+
+    timerRef.current = setInterval(() => {
+      const current = recordingRef.current;
+      if (!current) return;
+      const elapsedMs = clockNow() - current.startedAt;
+      if (elapsedMs >= MAX_STEP_SECONDS * 1000) {
+        finishRecording(true);
+        return;
+      }
+      setRecording({ ...current, elapsedMs });
+    }, 100);
+  }
+
+  function stopNow() {
+    if (recordingRef.current) finishRecording(true);
+    else onCommand('S', 'Route recorder stop');
+  }
+
+  useEffect(
+    () => () => {
+      if (!recordingRef.current) return;
+      clearInterval(timerRef.current);
+      recordingRef.current = null;
+      onCommand('S');
+    },
+    [onCommand]
+  );
+
+  const editorBusy = busy || !!recording;
 
   const updateStep = (index, patch) =>
     setDraft({ ...draft, steps: draft.steps.map((s, i) => (i === index ? { ...s, ...patch } : s)) });
@@ -479,11 +546,82 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
         />
       </label>
 
+      <div className="route-recorder">
+        <div className="route-recorder-copy">
+          <strong>Record with joystick</strong>
+          <span className="muted small">
+            Press and hold a direction to move. Release it to stop and add the measured time as a step.
+          </span>
+        </div>
+
+        <div className="joystick-pad route-recorder-pad">
+          {PAD_LAYOUT.flat().map((cmd, i) =>
+            cmd == null ? (
+              <span key={`record-gap-${i}`} className="joystick-gap" />
+            ) : cmd === 'S' ? (
+              <button
+                key={cmd}
+                type="button"
+                className="joystick-btn cmd-S"
+                disabled={busy}
+                onClick={stopNow}
+                aria-label="Stop recording and vehicle"
+              >
+                <span className="joystick-glyph">{PAD_GLYPH[cmd]}</span>
+                <span className="joystick-label">Stop</span>
+                <span className="joystick-code">S</span>
+              </button>
+            ) : (
+              <button
+                key={cmd}
+                type="button"
+                className={`joystick-btn cmd-${cmd} ${recording?.direction === cmd ? 'active' : ''}`}
+                disabled={busy || (!!recording && recording.direction !== cmd)}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  startRecording(cmd);
+                }}
+                onPointerUp={(event) => {
+                  event.preventDefault();
+                  finishRecording(true);
+                }}
+                onPointerCancel={() => finishRecording(true)}
+                onKeyDown={(event) => {
+                  if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) {
+                    event.preventDefault();
+                    startRecording(cmd);
+                  }
+                }}
+                onKeyUp={(event) => {
+                  if (event.key === ' ' || event.key === 'Enter') {
+                    event.preventDefault();
+                    finishRecording(true);
+                  }
+                }}
+                aria-pressed={recording?.direction === cmd}
+              >
+                <span className="joystick-glyph">{PAD_GLYPH[cmd]}</span>
+                <span className="joystick-label">{DIRECTION_LABEL[cmd]}</span>
+                <span className="joystick-code">Hold {cmd}</span>
+              </button>
+            )
+          )}
+        </div>
+
+        <div className={`route-recording-readout ${recording ? 'active' : ''}`} aria-live="polite">
+          <span>{recording ? `Moving ${DIRECTION_LABEL[recording.direction].toLowerCase()}` : 'Ready to record'}</span>
+          <strong>{recording ? `${(recording.elapsedMs / 1000).toFixed(1)}s` : '0.0s'}</strong>
+        </div>
+      </div>
+
       <div className="route-step-editor">
+        {draft.steps.length === 0 && <p className="muted small route-empty-steps">No movements recorded yet.</p>}
         {draft.steps.map((step, i) => (
           <div key={i} className="route-step-row">
             <span className="route-step-index">{i + 1}</span>
-            <select value={step.direction} onChange={(e) => updateStep(i, { direction: e.target.value })}>
+            <select disabled={editorBusy} value={step.direction} onChange={(e) => updateStep(i, { direction: e.target.value })}>
               {STEP_DIRECTIONS.map((d) => (
                 <option key={d} value={d}>
                   {DIRECTION_LABEL[d]} ({d})
@@ -496,6 +634,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
                 min={MIN_STEP_SECONDS}
                 max={MAX_STEP_SECONDS}
                 value={step.seconds}
+                disabled={editorBusy}
                 onChange={(e) =>
                   updateStep(i, {
                     seconds: Math.min(
@@ -510,20 +649,20 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
             <button
               type="button"
               className="btn btn-outline route-step-test"
-              disabled={busy}
+              disabled={editorBusy}
               title={`Send ${DIRECTION_LABEL[step.direction]} (${step.direction}) for ${step.seconds}s now`}
               onClick={() => onTest([step], `step ${i + 1} (${step.direction} ${step.seconds}s)`)}
             >
               ▶ Test
             </button>
             <div className="route-step-buttons">
-              <button type="button" className="icon-btn" disabled={i === 0} onClick={() => moveStep(i, -1)} aria-label="Move step up">
+              <button type="button" className="icon-btn" disabled={editorBusy || i === 0} onClick={() => moveStep(i, -1)} aria-label="Move step up">
                 ↑
               </button>
               <button
                 type="button"
                 className="icon-btn"
-                disabled={i === draft.steps.length - 1}
+                disabled={editorBusy || i === draft.steps.length - 1}
                 onClick={() => moveStep(i, 1)}
                 aria-label="Move step down"
               >
@@ -532,6 +671,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
               <button
                 type="button"
                 className="icon-btn danger"
+                disabled={editorBusy}
                 onClick={() => setDraft({ ...draft, steps: draft.steps.filter((_, idx) => idx !== i) })}
                 aria-label="Remove step"
               >
@@ -546,6 +686,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
         <button
           type="button"
           className="btn btn-outline"
+          disabled={editorBusy}
           onClick={() => setDraft({ ...draft, steps: [...draft.steps, { direction: 'F', seconds: 5 }] })}
         >
           + Add step
@@ -566,17 +707,17 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
             <IconStop /> Stop test
           </button>
         ) : (
-          <button type="button" className="btn btn-outline" disabled={busy} onClick={() => onTest(draft.steps, draftName)}>
+          <button type="button" className="btn btn-outline" disabled={editorBusy || total === 0} onClick={() => onTest(draft.steps, draftName)}>
             ▶ Test all steps ({total}s)
           </button>
         )}
       </div>
 
       <div className="route-editor-actions">
-        <button type="button" className="btn btn-accent" disabled={busy} onClick={onSave}>
+        <button type="button" className="btn btn-accent" disabled={editorBusy} onClick={onSave}>
           <IconCheck /> {draft.id ? 'Update route' : 'Save route'}
         </button>
-        <button type="button" className="btn btn-outline" onClick={onCancel}>
+        <button type="button" className="btn btn-outline" disabled={!!recording} onClick={onCancel}>
           Cancel
         </button>
       </div>
