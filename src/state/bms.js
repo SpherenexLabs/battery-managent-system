@@ -26,9 +26,9 @@ export function subscribeConnection(callback) {
 // Drive commands
 // ---------------------------------------------------------------------------
 
-// F = forward, B = backward, L = left, R = right, S = stop.
+// F = forward, B = backward, R = left, L = right, S = stop.
 export const DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
-const normalizeSpeed = (speed) => Math.max(0, Math.min(100, Math.round((Number(speed) || 0) / 10) * 10));
+const autoSpeedForDirection = (direction) => ({ F: 80, B: 80, L: 100, R: 100, S: 0 })[direction] ?? 0;
 
 export function setDirection(direction) {
   const value = DIRECTIONS.includes(direction) ? direction : 'S';
@@ -37,9 +37,9 @@ export function setDirection(direction) {
 
 // Auto mode writes direction and speed atomically so route playback cannot
 // briefly combine a new direction with the previous step's speed.
-export function setDriveCommand(direction, speed) {
+export function setDriveCommand(direction) {
   const value = DIRECTIONS.includes(direction) ? direction : 'S';
-  const normalizedSpeed = value === 'S' ? 0 : normalizeSpeed(speed);
+  const normalizedSpeed = autoSpeedForDirection(value);
   return update(ref(database, BMS_PATH), { direction: value, Speed: normalizedSpeed });
 }
 
@@ -90,12 +90,7 @@ export function subscribeRoutes(callback) {
       steps: Array.isArray(route?.steps)
         ? route.steps.map((step) => ({
             ...step,
-            speed:
-              step?.direction === 'S'
-                ? 0
-                : typeof step?.speed === 'number'
-                  ? normalizeSpeed(step.speed)
-                  : 50,
+            speed: autoSpeedForDirection(step?.direction),
           }))
         : [],
       updatedAt: route?.updatedAt ?? null,
@@ -112,7 +107,7 @@ export function saveRoute(route) {
     name: route.name,
     steps: route.steps.map((step) => ({
       direction: step.direction,
-      speed: step.direction === 'S' ? 0 : normalizeSpeed(step.speed),
+      speed: autoSpeedForDirection(step.direction),
       seconds: step.seconds,
     })),
     updatedAt: Date.now(),

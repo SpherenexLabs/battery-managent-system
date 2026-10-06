@@ -35,9 +35,17 @@ export const THERMAL_LIMITS = {
 export const DIRECTION_LABEL = {
   F: 'Forward',
   B: 'Backward',
-  L: 'Left',
-  R: 'Right',
+  L: 'Right',
+  R: 'Left',
   S: 'Stopped',
+};
+
+export const AUTO_SPEED_BY_DIRECTION = {
+  F: 80,
+  B: 80,
+  L: 100,
+  R: 100,
+  S: 0,
 };
 
 export function getChargingPower(state) {
@@ -52,17 +60,11 @@ const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 // Issues a drive command. The bumped sequence number gives every command a
 // fresh identity, so re-sending the same direction still reaches the device.
-const routeStepSpeed = (step) =>
-  step?.direction === 'S'
-    ? 0
-    : Number.isFinite(step?.speed)
-      ? clamp(Math.round(step.speed / 10) * 10, 0, 100)
-      : 50;
+const routeStepSpeed = (step) => AUTO_SPEED_BY_DIRECTION[step?.direction] ?? 0;
 
 const withCommand = (state, direction, speed) => {
   const hasSpeed = Number.isFinite(speed);
-  const normalizedSpeed =
-    direction === 'S' && hasSpeed ? 0 : hasSpeed ? clamp(Math.round(speed / 10) * 10, 0, 100) : null;
+  const normalizedSpeed = hasSpeed ? (AUTO_SPEED_BY_DIRECTION[direction] ?? 0) : null;
   return {
     command: {
       direction,
@@ -334,7 +336,7 @@ export const initialState = {
   pumpRelay: 0, // Relay1 — coolant pump
   fanRelay: 0, // Relay2 — cooling fan
   heatPercent: 0, // Heat — artificial heating level, 0-100 %
-  direction: 'S', // F = forward, B = backward, L = left, R = right, S = stop
+  direction: 'S', // F = forward, B = backward, R = left, L = right, S = stop
   speed: 0, // Speed = motor speed percentage, 0-100
   driveMode: 'manual', // manual | auto
   slots: [-1, -1, -1, -1],

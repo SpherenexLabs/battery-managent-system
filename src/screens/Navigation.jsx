@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DIRECTION_LABEL, routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
+import {
+  AUTO_SPEED_BY_DIRECTION,
+  DIRECTION_LABEL,
+  routeTotalSeconds,
+  useEvDispatch,
+  useEvState,
+} from '../state/store.js';
 import { PageHeader, InfoNote } from '../components/ui.jsx';
 import { IconBolt, IconCar, IconCheck, IconList, IconStop, IconTarget } from '../components/icons.jsx';
 import { deleteRoute, saveRoute } from '../state/bms.js';
@@ -186,8 +192,8 @@ export default function Navigation() {
         )}
 
         <InfoNote>
-          Every direction is written to <code>BMS_5578/direction</code>. Auto mode also writes joystick distance
-          to <code>BMS_5578/Speed</code> from 0 to 100 and replays each step's saved direction, speed, and duration.
+          Every direction is written to <code>BMS_5578/direction</code>. In Auto mode, Forward and Backward use
+          80% speed, Left and Right use 100%, and Stop uses 0%. Routes replay each saved direction and duration.
         </InfoNote>
       </div>
 
@@ -325,7 +331,7 @@ function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onR
 
     const deadZone = Math.min(rect.width, rect.height) * 0.1;
     const nextDirection =
-      distance < deadZone ? null : Math.abs(x) > Math.abs(y) ? (x > 0 ? 'R' : 'L') : y > 0 ? 'B' : 'F';
+      distance < deadZone ? null : Math.abs(x) > Math.abs(y) ? (x > 0 ? 'L' : 'R') : y > 0 ? 'B' : 'F';
     const nextSpeed = nextDirection
       ? Math.min(100, Math.max(0, Math.round(((distance - deadZone) / (maxTravel - deadZone)) * 10) * 10))
       : 0;
@@ -356,8 +362,8 @@ function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onR
     const positions = {
       F: { x: 0, y: -offset },
       B: { x: 0, y: offset },
-      L: { x: -offset, y: 0 },
-      R: { x: offset, y: 0 },
+      L: { x: offset, y: 0 },
+      R: { x: -offset, y: 0 },
     };
     setKnobPosition(positions[direction]);
     onDirectionChange(direction, 100);
@@ -385,7 +391,7 @@ function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onR
       onPointerUp={releaseJoystick}
       onPointerCancel={releaseJoystick}
       onKeyDown={(event) => {
-        const keys = { ArrowUp: 'F', ArrowDown: 'B', ArrowLeft: 'L', ArrowRight: 'R' };
+        const keys = { ArrowUp: 'F', ArrowDown: 'B', ArrowLeft: 'R', ArrowRight: 'L' };
         const nextDirection = keys[event.key];
         if (!nextDirection || event.repeat) return;
         event.preventDefault();
@@ -401,8 +407,8 @@ function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onR
       }}
     >
       <span className="joystick-axis axis-forward">F</span>
-      <span className="joystick-axis axis-left">L</span>
-      <span className="joystick-axis axis-right">R</span>
+      <span className="joystick-axis axis-left">R</span>
+      <span className="joystick-axis axis-right">L</span>
       <span className="joystick-axis axis-backward">B</span>
       <div className="joystick-ring" />
       <div
@@ -447,7 +453,8 @@ function AutoPanel({
               Step {playback.stepIndex + 1} / {playback.steps.length}
             </span>
             <strong>
-              {DIRECTION_LABEL[activeStep.direction]} ({activeStep.direction}) at {activeStep.speed ?? 50}%
+              {DIRECTION_LABEL[activeStep.direction]} ({activeStep.direction}) at{' '}
+              {AUTO_SPEED_BY_DIRECTION[activeStep.direction] ?? 0}%
             </strong>
             <span className="route-countdown">{playback.remaining}s left</span>
           </div>
@@ -457,7 +464,7 @@ function AutoPanel({
                 key={`${step.direction}-${i}`}
                 className={i < playback.stepIndex ? 'done' : i === playback.stepIndex ? 'current' : ''}
               >
-                {step.direction} · {step.speed ?? 50}% · {step.seconds}s
+                {step.direction} · {AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% · {step.seconds}s
               </li>
             ))}
           </ol>
@@ -499,7 +506,7 @@ function AutoPanel({
                     <div className="route-chip-row">
                       {route.steps.map((step, i) => (
                         <span key={`${route.id}-${i}`} className="route-chip">
-                          {step.direction} {step.speed ?? 50}% · {step.seconds}s
+                          {step.direction} {AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% · {step.seconds}s
                         </span>
                       ))}
                     </div>
@@ -586,6 +593,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
 
   function startRecording(direction, speed) {
     if (busy) return;
+    speed = AUTO_SPEED_BY_DIRECTION[direction] ?? speed;
     const now = clockNow();
 
     if (recordingRef.current) {
@@ -676,7 +684,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
         <div className="route-recorder-copy">
           <strong>Record with joystick</strong>
           <span className="muted small">
-            Drag the knob: angle controls direction and distance from the center controls speed from 0 to 100.
+            Drag the knob to choose a direction. Forward/Backward run at 80%; Left/Right run at 100%.
             Release to stop and record the movement.
           </span>
         </div>
@@ -708,7 +716,10 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
               disabled={editorBusy}
               value={step.direction}
               onChange={(e) =>
-                updateStep(i, { direction: e.target.value, ...(e.target.value === 'S' ? { speed: 0 } : {}) })
+                updateStep(i, {
+                  direction: e.target.value,
+                  speed: AUTO_SPEED_BY_DIRECTION[e.target.value] ?? 0,
+                })
               }
             >
               {STEP_DIRECTIONS.map((d) => (
@@ -723,8 +734,8 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
                 min="0"
                 max="100"
                 step="10"
-                value={step.speed ?? (step.direction === 'S' ? 0 : 50)}
-                disabled={editorBusy || step.direction === 'S'}
+                value={AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}
+                disabled
                 aria-label={`Speed for step ${i + 1}`}
                 onChange={(e) =>
                   updateStep(i, {
@@ -756,8 +767,13 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
               type="button"
               className="btn btn-outline route-step-test"
               disabled={editorBusy}
-              title={`Send ${DIRECTION_LABEL[step.direction]} (${step.direction}) at ${step.speed ?? 50}% for ${step.seconds}s now`}
-              onClick={() => onTest([step], `step ${i + 1} (${step.direction} ${step.speed ?? 50}% ${step.seconds}s)`)}
+              title={`Send ${DIRECTION_LABEL[step.direction]} (${step.direction}) at ${AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% for ${step.seconds}s now`}
+              onClick={() =>
+                onTest(
+                  [step],
+                  `step ${i + 1} (${step.direction} ${AUTO_SPEED_BY_DIRECTION[step.direction] ?? 0}% ${step.seconds}s)`
+                )
+              }
             >
               ▶ Test
             </button>
@@ -793,7 +809,7 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
           type="button"
           className="btn btn-outline"
           disabled={editorBusy}
-          onClick={() => setDraft({ ...draft, steps: [...draft.steps, { direction: 'F', speed: 50, seconds: 5 }] })}
+          onClick={() => setDraft({ ...draft, steps: [...draft.steps, { direction: 'F', speed: 80, seconds: 5 }] })}
         >
           + Add step
         </button>
