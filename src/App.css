@@ -1331,7 +1331,8 @@
 
 .circular-joystick {
   position: relative;
-  width: min(72vw, 260px);
+  width: clamp(190px, 48vw, 280px);
+  max-width: 100%;
   aspect-ratio: 1;
   flex-shrink: 0;
   border: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border));
@@ -1892,11 +1893,88 @@
 
   .route-step-row {
     flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .route-step-row select {
+    flex: 1 1 calc(100% - 40px);
+  }
+
+  .route-step-seconds {
+    flex: 1 1 110px;
+  }
+
+  .route-step-seconds input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .route-step-test {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .route-step-buttons {
+    margin-left: auto;
+  }
+
+  .route-list-actions {
+    width: 100%;
+  }
+
+  .route-list-actions .btn {
+    flex: 1 1 auto;
   }
 
   .joystick-pad {
     grid-template-columns: repeat(3, minmax(78px, 1fr));
     width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .route-editor,
+  .joystick-card {
+    padding: 14px;
+  }
+
+  .route-recorder {
+    padding: 12px 8px;
+  }
+
+  .circular-joystick {
+    width: min(76vw, 240px);
+  }
+
+  .route-recording-readout {
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .route-recorder-stop,
+  .route-editor-actions .btn,
+  .route-test-bar .btn {
+    width: 100%;
+  }
+
+  .drive-mode-switch {
+    display: flex;
+    width: 100%;
+  }
+
+  .drive-mode-btn {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .route-playing-step {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .route-countdown {
+    width: 100%;
+    margin-left: 0;
   }
 }
 

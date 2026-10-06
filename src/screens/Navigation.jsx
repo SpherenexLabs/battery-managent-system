@@ -351,7 +351,8 @@ function CircularJoystick({ activeDirection, activeSpeed, onDirectionChange, onR
     if (disabled || directionRef.current === direction) return;
     directionRef.current = direction;
     speedRef.current = 100;
-    const offset = 68;
+    const rect = baseRef.current?.getBoundingClientRect();
+    const offset = rect ? Math.min(rect.width, rect.height) * 0.3 : 68;
     const positions = {
       F: { x: 0, y: -offset },
       B: { x: 0, y: offset },
