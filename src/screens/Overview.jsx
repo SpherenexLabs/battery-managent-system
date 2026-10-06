@@ -245,8 +245,8 @@ export default function Overview() {
         </section>
 
         <Scene3D
-          title="Live Direction"
-          hint={`Live command: ${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}
+          title="Live Vehicle Route Position"
+          hint={`120 × 160 cm map · current command: ${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}
           mode="drive"
         />
       </div>

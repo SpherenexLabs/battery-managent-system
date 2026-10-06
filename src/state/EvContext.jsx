@@ -2,6 +2,8 @@ import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS } from './store.js';
 import { setDirection, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
 
+const PLAYBACK_TICK_MS = 100;
+
 function getInitialState() {
   const hash = window.location.hash.slice(1);
   return SCREEN_IDS.includes(hash) ? { ...initialState, screen: hash } : initialState;
@@ -39,12 +41,15 @@ export function EvProvider({ children }) {
     setDirection(state.command.direction);
   }, [state.command]);
 
-  // Auto-route playback clock. One tick a second while a route is running;
+  // Auto-route playback clock. 100 ms ticks support route steps in 0.1-second increments;
   // the interval is rebuilt only when playback starts or stops, not per tick.
   const playbackActive = state.playback != null;
   useEffect(() => {
     if (!playbackActive) return undefined;
-    const id = setInterval(() => dispatch({ type: 'PLAYBACK_TICK' }), 1000);
+    const id = setInterval(
+      () => dispatch({ type: 'PLAYBACK_TICK', elapsedSeconds: PLAYBACK_TICK_MS / 1000 }),
+      PLAYBACK_TICK_MS
+    );
     return () => clearInterval(id);
   }, [playbackActive]);
 

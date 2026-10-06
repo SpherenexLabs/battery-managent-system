@@ -613,11 +613,15 @@ function reducerInner(state, action) {
     case 'PLAYBACK_TICK': {
       if (!state.playback) return state;
       const { steps, stepIndex, remaining, kind, label } = state.playback;
+      const elapsedSeconds = action.elapsedSeconds ?? 1;
       if (!steps || steps.length === 0) return { ...state, playback: null, ...withCommand(state, 'S') };
 
       // Still inside the current step — just count it down.
-      if (remaining > 1) {
-        const playback = { ...state.playback, remaining: remaining - 1 };
+      if (remaining > elapsedSeconds) {
+        const playback = {
+          ...state.playback,
+          remaining: Math.round((remaining - elapsedSeconds) * 10) / 10,
+        };
         const navProgress =
           kind === 'route' ? stepsProgress(steps, stepIndex, playback.remaining) : state.navProgress;
         return { ...state, playback, navProgress };

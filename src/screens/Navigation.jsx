@@ -18,8 +18,9 @@ const PAD_GLYPH = { F: '▲', B: '▼', L: '◀', R: '▶', S: '■' };
 
 const STEP_DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
 
-const MIN_STEP_SECONDS = 1;
+const MIN_STEP_SECONDS = 0.1;
 const MAX_STEP_SECONDS = 600;
+const STEP_SECONDS_INCREMENT = 0.1;
 
 const emptyDraft = () => ({ id: null, name: '', steps: [{ direction: 'F', seconds: 5 }] });
 
@@ -143,8 +144,8 @@ export default function Navigation() {
         </div>
 
         <Scene3D
-          title="Live 3D View"
-          hint="The vehicle responds to the same command the controller receives — drive it and watch it move."
+          title="Live 120 × 160 cm Route Map"
+          hint="Live guidance shows only the current move ahead; the completed path remains behind the car."
           mode="drive"
         />
 
@@ -495,12 +496,17 @@ function RouteEditor({ draft, setDraft, onSave, onCancel, onTest, onStop, playba
                 type="number"
                 min={MIN_STEP_SECONDS}
                 max={MAX_STEP_SECONDS}
+                step={STEP_SECONDS_INCREMENT}
                 value={step.seconds}
                 onChange={(e) =>
                   updateStep(i, {
                     seconds: Math.min(
                       MAX_STEP_SECONDS,
-                      Math.max(MIN_STEP_SECONDS, Math.round(Number(e.target.value) || MIN_STEP_SECONDS))
+                      Math.max(
+                        MIN_STEP_SECONDS,
+                        Math.round((Number(e.target.value) || MIN_STEP_SECONDS) / STEP_SECONDS_INCREMENT) *
+                          STEP_SECONDS_INCREMENT
+                      )
                     ),
                   })
                 }

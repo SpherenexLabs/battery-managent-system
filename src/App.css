@@ -2447,6 +2447,75 @@
   pointer-events: none;
 }
 
+.scene3d-scale,
+.scene3d-route-live,
+.scene3d-point-status {
+  position: absolute;
+  left: 12px;
+  padding: 5px 10px;
+  border: 1px solid rgba(94, 234, 212, 0.28);
+  border-radius: 8px;
+  background: rgba(11, 18, 32, 0.82);
+  color: #cbd5e1;
+  font-size: 11.5px;
+  pointer-events: none;
+}
+
+.scene3d-scale {
+  top: 10px;
+}
+
+.scene3d-route-live {
+  top: 76px;
+  display: grid;
+  gap: 2px;
+  color: #5eead4;
+}
+
+.scene3d-point-status {
+  top: 44px;
+  color: #f8fafc;
+}
+
+.scene3d-path-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 42px;
+  display: flex;
+  gap: 12px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: rgba(11, 18, 32, 0.82);
+  color: #cbd5e1;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.scene3d-path-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.scene3d-path-legend i {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+}
+
+.scene3d-path-legend .guidance {
+  background: #fbbf24;
+}
+
+.scene3d-path-legend .actual {
+  background: #5eead4;
+}
+
+.scene3d-route-live strong {
+  color: #f8fafc;
+  font-size: 12px;
+}
+
 .scene3d-reset {
   position: absolute;
   right: 12px;
@@ -2465,6 +2534,15 @@
 .scene3d-reset:hover {
   border-color: var(--accent);
   color: #5eead4;
+}
+
+.scene3d-point-reset {
+  top: 44px;
+}
+
+.scene3d-reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .scene3d canvas {

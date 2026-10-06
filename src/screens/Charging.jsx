@@ -33,9 +33,9 @@ export default function Charging() {
       <PageHeader title="Screen 4 — Wireless Charging" />
 
       <Scene3D
-        title="Live 3D Charging View"
-        hint="Energy rings run from the transmitter pad to the vehicle while the session is active."
-        mode="charge"
+        title="Live Vehicle Route Position"
+        hint="The same 120 × 160 cm car map and step-by-step guidance used throughout the dashboard."
+        mode="drive"
       />
 
       <div className="charge-layout">

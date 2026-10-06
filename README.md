@@ -42,7 +42,7 @@ health and alerts.**
 | Auto driving | Named routes of timed direction steps ("forward 5s, left 10s, right 8s, backward 9s"), stored in Firebase, with create / edit / delete and timed playback |
 | Test before saving | Any step, or a whole draft, can be sent to the vehicle for real while you are still editing it — so a timing can be checked against the hardware before it is committed |
 | Reserve & play | Reserving a station means picking one of your saved routes; confirming the reservation plays it immediately |
-| 3D animation | A live three.js view of the vehicle driving the yard and docking, with wireless-charging energy rings — driven by the same `direction` command the controller receives |
+| 3D animation | The same scaled 120 × 160 cm route map on Overview, Drive Control and Charging, with a top-view car, current-step guidance, completed-path tracking and final-position reporting |
 | 360° camera | Orbit the scene a full turn with the mouse — drag to look around, scroll to zoom, right-drag to pan, one button to reset |
 | Alerts | 12 rule-based alerts covering low battery, overheating, voltage/current/SOC instability, slow charging, repeated overheat, frequent cooling, and BMS offline |
 | Thermal safety | Automatic pump + fan cooling with hysteresis, heating safety cut-off, fast-charge downgrade, and automatic charging pause on critical temperature |
@@ -511,20 +511,21 @@ Auto** toggle at the top.
 **Drive status banner.** Plain-language status plus the **live command** currently
 sitting in `BMS_5578/direction`.
 
-**Live 3D View.** A three.js scene of the charging yard — ground grid, all four station
-pads (the reserved one highlighted and pulsing), and the vehicle. It is not a canned
-animation: the vehicle reacts to the *same* `direction` value the controller receives,
-so `F` drives it forward, `B` reverses, `L`/`R` steer, and `S` stops it, with the wheels
-spinning at its speed.
+**Live route map.** A three.js representation of the 120 × 160 cm demonstration sheet.
+A small top-view car always starts at the bottom centre `(60 cm, 0 cm)`. During playback,
+a yellow guide shows only the current command ahead of the car; future steps remain
+hidden. The completed path is retained in cyan, and the ending position is marked and
+reported in centimetres.
 
 **Looking around.** The camera is fully free:
 
 | Gesture | Does |
 | --- | --- |
 | Left-drag | Orbit a full 360° around the subject, from ground level up to overhead |
-| Scroll | Zoom in and out (4–44 units) |
+| Scroll | Zoom in and out (4–36 units) |
 | Right-drag | Pan the view |
 | **Reset view** | Restore the starting angle and distance |
+| **Reset point** | Return the car to `(60 cm, 0 cm)` and clear its completed path |
 
 Whatever angle and distance you choose is kept as the vehicle drives — the camera moves
 *with* it rather than snapping back, so the subject never leaves the frame. The pitch
@@ -563,7 +564,7 @@ three buttons:
 
 - **Route name** — must be unique; duplicates are rejected with a message.
 - **Steps** — each row is a direction dropdown (Forward / Backward / Left / Right /
-  Stop) and a seconds box (1–600). Reorder with **↑ / ↓**, remove with **✕**, and add
+  Stop) and a seconds box (0.1–600, in 0.1-second / 100 ms increments). Reorder with **↑ / ↓**, remove with **✕**, and add
   more with **+ Add step**. The total run time updates as you edit.
 - **Save route** / **Update route** writes to `/auto_routes`; **Cancel** discards.
 
@@ -593,6 +594,13 @@ the two are independent, so you can test as many times as you like before saving
 direction, a live seconds countdown, and a progress track of all steps (done / current /
 pending). **Stop route** halts it and writes `S`.
 
+The 3D route view represents the physical **120 × 160 cm demonstration sheet** at
+10 cm per scene unit. A small top-view car starts at the bottom centre `(60 cm, 0 cm)`.
+Only the current direction is shown ahead as live guidance; future route steps stay hidden.
+The car follows the active route timing while its completed path is recorded separately.
+The final position is marked and reported.
+**Reset point** returns the car to the starting position and clears the travelled path when no route is running.
+
 Playback is cancelled and `S` written if you switch to Manual, press **Stop vehicle**,
 delete the running route, or leave the screen.
 
@@ -605,11 +613,9 @@ prompt, and a red **Stop vehicle** button that always sends `S` immediately.
 
 ### 8.4 Charging — wireless charging session
 
-**Live 3D Charging View.** The same scene in docked mode — the vehicle eases onto the
-reserved station's transmitter pad. The camera orbits it slowly on its own until you
-touch it, after which it is yours (same drag / scroll / right-drag / **Reset view** as
-on Drive Control). While a session is active, energy rings climb from the pad to the
-vehicle; they slow and dim when charging is paused.
+**Live Vehicle Route Position.** Charging uses the same 120 × 160 cm map, top-view car,
+current-step guidance and completed-path presentation as Overview and Drive Control.
+The animation no longer switches to a separate docking or energy-ring scene.
 
 **Summary bar.** Selected station, Arrival Confirmed/Pending, Coil Alignment
 Confirmed/Pending, and a Cooling Active flag showing pump and fan state.
@@ -724,7 +730,7 @@ A complete demo run, start to finish:
    **Confirm & Play** — Drive Control opens and the route runs. When the last step ends,
    the vehicle is marked arrived.
 8. **On arrival**, click **Start Wireless Charging** on the side panel, then open the
-   Charging screen to watch the energy rings.
+   Charging screen to see the same vehicle route-position map alongside the session.
 9. **Watch the session** — mode, SOC, session timer, live power, energy delivered.
 10. **Demonstrate thermal safety** — open Thermal Control and raise the Heat % slider.
     As the battery warms:
@@ -931,7 +937,8 @@ Known constraints, stated plainly:
   auto route's last step finishes, not by a physical arrival sensor.
 - **The 3D view is an illustration, not a digital twin.** It integrates the live
   `direction` command over time with fixed speed and turn rates, so it shows what the
-  vehicle was *told* to do — not surveyed position. Yard layout and scale are arbitrary.
+  vehicle was *told* to do — not surveyed position. The map is scaled to the 120 × 160 cm
+  demonstration sheet, but its position remains an estimate until a physical tracker is connected.
 - **The 3D vehicle carries no battery readout.** SOC, health and thermal state are read
   from the metric cards, sidebar and Thermal screen; the 3D view is purely the vehicle
   and the yard.
