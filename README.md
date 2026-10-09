@@ -6,6 +6,20 @@ telemetry from an IoT controller (published to Firebase Realtime Database under
 control commands back to the hardware — drive direction, artificial heating level,
 coolant pump relay, and cooling fan relay.
 
+> **Current station-control workflow:** Automatic navigation now uses the controller's
+> built-in `BMS_5578/Execute_Path` and `BMS_5578/Path_Name` fields. Reserving first
+> writes `Execute_Path = 1`, waits until the controller writes `Ready` back to that
+> field, and only then writes the selected station number to `Path_Name`. The `/BMS` branch
+> supplies four-station `Current*`, `Voltage*`, and `Switch*` (or `Relay*`) telemetry;
+> the dashboard mirrors those switches to complementary `green1`…`green4`,
+> `red1`…`red4`, and `Relay1`…`Relay4` outputs. Station numbers map directly to
+> controller path names. Older saved-route
+> descriptions later in this document describe the retained legacy helpers, not the
+> current Auto-mode UI.
+
+After the Ready handshake, the selected `Path_Name` command is held for five seconds.
+The dashboard then resets both `Execute_Path` and `Path_Name` to `0`.
+
 The dashboard covers the full journey: **monitor the battery → detect a low/overheat
 condition → find and reserve a nearby wireless charging station → drive the vehicle
 there with the joystick or a saved auto route → dock and charge wirelessly → review
@@ -39,14 +53,14 @@ health and alerts.**
 | Live telemetry | Vehicle voltage, station voltage, current, temperature, heating level, pump relay, fan relay and drive direction — streamed from Firebase with no polling |
 | Battery state | SOC derived from vehicle pack voltage, SOH estimated from temperature/voltage |
 | Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `BMS_5578/direction` |
-| Auto driving | Named routes of timed direction steps ("forward 5s, left 10s, right 8s, backward 9s"), stored in Firebase, with create / edit / delete and timed playback |
-| Test before saving | Any step, or a whole draft, can be sent to the vehicle for real while you are still editing it — so a timing can be checked against the hardware before it is committed |
-| Reserve & play | Reserving a station means picking one of your saved routes; confirming the reservation plays it immediately |
+| Auto driving | One-click station reservation writes `Execute_Path = 1`, waits for `Ready`, then writes the station number to `Path_Name` |
+| Live path feedback | `Slot1`…`Slot4` provide vehicle-to-station distance and drive the journey progress/arrival animation |
+| Reserve & go | Station 1 → path 1, Station 2 → path 2, Station 3 → path 3, Station 4 → path 4 |
 | 3D animation | The same scaled 120 × 160 cm route map on Overview, Drive Control and Charging, with a top-view car, current-step guidance, completed-path tracking and final-position reporting |
 | 360° camera | Orbit the scene a full turn with the mouse — drag to look around, scroll to zoom, right-drag to pan, one button to reset |
 | Alerts | 12 rule-based alerts covering low battery, overheating, voltage/current/SOC instability, slow charging, repeated overheat, frequent cooling, and BMS offline |
 | Thermal safety | Automatic pump + fan cooling with hysteresis, heating safety cut-off, fast-charge downgrade, and automatic charging pause on critical temperature |
-| Stations | 4 wireless charging stations with live occupancy, current/voltage/power, GPS distance and compass bearing, reservation, and Google Maps directions |
+| Stations | 4 live stations with switch-driven green/red state, current/voltage/power graphs, slot distance, reservation, and Three.js animation |
 | Wireless charging | Arrival + coil-alignment confirmation, charge modes, live power, session timer, and energy integration |
 | Health | Alert table with severity/status, event log with real timestamps, and operator acknowledgement |
 

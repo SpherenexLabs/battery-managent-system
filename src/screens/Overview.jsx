@@ -20,6 +20,7 @@ import Scene3D from '../components/Scene3D.jsx';
 const STATION_META = {
   available: { label: 'Available', color: 'green' },
   occupied: { label: 'Occupied', color: 'red' },
+  engaged: { label: 'Engaged', color: 'red' },
   reserved: { label: 'Reserved', color: 'blue' },
   charging: { label: 'Charging', color: 'teal' },
 };
@@ -204,7 +205,7 @@ export default function Overview() {
                         <span className="muted small">Nearest charging stations (free bays first)</span>
                         <div className="alert-station-list">
                           {nearestStations.map((station) => {
-                            const meta = STATION_META[station.status];
+                            const meta = STATION_META[station.status] || STATION_META.occupied;
                             return (
                               <button
                                 key={station.id}

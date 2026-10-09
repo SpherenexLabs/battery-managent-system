@@ -952,6 +952,20 @@
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
+.station-card.station-engaged {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.12), var(--shadow);
+}
+
+.station-card.station-ready .station-card-art {
+  color: #16a34a;
+}
+
+.station-card.station-engaged .station-card-art {
+  color: #dc2626;
+  background: #fff1f2;
+}
+
 .station-card-check {
   position: absolute;
   top: 14px;
@@ -988,6 +1002,35 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.station-switch-lamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.station-switch-lamp.ready {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.station-switch-lamp.engaged {
+  color: #991b1b;
+  background: #fee2e2;
+  animation: engaged-pulse 1.25s ease-in-out infinite;
+}
+
+@keyframes engaged-pulse {
+  50% { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.14); }
 }
 
 .station-slot-summary {
@@ -1054,6 +1097,16 @@
   line-height: 1.25;
 }
 
+.station-readout.danger {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.station-readout.danger .station-readout-icon,
+.station-readout .text-danger {
+  color: #dc2626;
+}
+
 .station-iot-dot {
   display: block;
   width: 8px;
@@ -1065,7 +1118,7 @@
 
 .station-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -1073,6 +1126,79 @@
   min-height: 38px;
   padding: 8px 10px;
   font-size: 12.5px;
+}
+
+.station-chart {
+  padding: 9px 10px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.station-chart-head,
+.station-chart-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.station-chart-head strong {
+  margin-right: auto;
+  color: var(--text-h);
+  font-size: 11.5px;
+}
+
+.station-chart-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.station-chart-head i {
+  width: 14px;
+  height: 3px;
+  border-radius: 99px;
+}
+
+.voltage-line { background: #14b8a6; }
+.current-line { background: #f59e0b; }
+
+.station-chart svg {
+  display: block;
+  width: 100%;
+  height: 92px;
+  margin: 5px 0 2px;
+  overflow: visible;
+}
+
+.chart-grid-line {
+  stroke: color-mix(in srgb, var(--border) 85%, transparent);
+  stroke-width: 1;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-voltage { stroke: #14b8a6; }
+.chart-current { stroke: #f59e0b; }
+
+.station-chart-empty {
+  display: grid;
+  place-items: center;
+  min-height: 92px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.station-chart-range {
+  justify-content: space-between;
 }
 
 .station-location-bar {
@@ -1109,6 +1235,7 @@
   .station-card-head,
   .station-electrical,
   .station-live-details,
+  .station-chart,
   .station-actions {
     grid-column: 1 / -1;
   }
@@ -1314,6 +1441,74 @@
 .drive-mode-btn.active {
   background: var(--accent);
   color: #fff;
+}
+
+.auto-journey-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: linear-gradient(135deg, var(--card-bg), var(--accent-bg));
+}
+
+.auto-journey-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.auto-journey-head h3 {
+  margin: 3px 0 0;
+  color: var(--text-h);
+  font-size: 18px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.path-signal {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--card-bg);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.path-signal.active {
+  color: #166534;
+  border-color: #86efac;
+  background: #dcfce7;
+}
+
+.auto-journey-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.auto-journey-metrics span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--card-bg);
+  font-size: 11px;
+}
+
+.auto-journey-metrics strong {
+  color: var(--text-h);
+  font-size: 15px;
 }
 
 /* ---------- Manual joystick ---------- */

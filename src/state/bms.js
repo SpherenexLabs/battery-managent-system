@@ -1,8 +1,16 @@
-import { onValue, ref, remove, set } from 'firebase/database';
+import { onValue, ref, remove, set, update } from 'firebase/database';
 import { database } from '../firebase.js';
 
 // Live telemetry node published by the vehicle controller.
 export const BMS_PATH = 'BMS_5578';
+export const STATIONS_PATH = 'BMS';
+
+// Path_Name uses the same number as the station selected in the UI.
+export const STATION_PATH_NAME = Object.freeze({ 1: 1, 2: 2, 3: 3, 4: 4 });
+const PATH_READY_TIMEOUT_MS = 30000;
+const PATH_COMMAND_DURATION_MS = 5000;
+const RESERVED_STATION_RED_DISTANCE_CM = 10;
+let pathResetTimer = null;
 
 // Saved auto-drive routes. Kept in a sibling node rather than inside the
 // telemetry node so the controller's live stream carries only live values.
@@ -11,6 +19,13 @@ export const ROUTES_PATH = 'auto_routes';
 export function subscribeBmsData(callback) {
   const bmsRef = ref(database, BMS_PATH);
   return onValue(bmsRef, (snapshot) => {
+    callback(snapshot.val() || {});
+  });
+}
+
+export function subscribeStationData(callback) {
+  const stationsRef = ref(database, STATIONS_PATH);
+  return onValue(stationsRef, (snapshot) => {
     callback(snapshot.val() || {});
   });
 }
@@ -32,6 +47,100 @@ export const DIRECTIONS = ['F', 'B', 'L', 'R', 'S'];
 export function setDirection(direction) {
   const value = DIRECTIONS.includes(direction) ? direction : 'S';
   return set(ref(database, `${BMS_PATH}/direction`), value);
+}
+
+// Wait for the controller to acknowledge Execute_Path = 1. The firmware writes
+// "Ready" back to the same field when it is ready to receive Path_Name.
+function waitForExecutePathReady(timeoutMs = PATH_READY_TIMEOUT_MS) {
+  const executePathRef = ref(database, `${BMS_PATH}/Execute_Path`);
+
+  return new Promise((resolve, reject) => {
+    let unsubscribe = null;
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      finish(new Error('The controller did not report Ready. Please try again.'));
+    }, timeoutMs);
+
+    function finish(error = null) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (unsubscribe) unsubscribe();
+      if (error) reject(error);
+      else resolve();
+    }
+
+    unsubscribe = onValue(
+      executePathRef,
+      (snapshot) => {
+        const value = snapshot.val();
+        if (typeof value === 'string' && value.trim().toLowerCase() === 'ready') {
+          finish();
+        }
+      },
+      (error) => finish(error)
+    );
+
+    // Protect against an implementation invoking the initial callback before
+    // onValue has returned its unsubscribe function.
+    if (settled && unsubscribe) unsubscribe();
+  });
+}
+
+// Start the controller's built-in path routine using its two-step handshake:
+// Execute_Path = 1 -> wait for Execute_Path = "Ready" -> Path_Name = station.
+export async function executeStationPath(stationId) {
+  const pathName = STATION_PATH_NAME[stationId];
+  if (pathName == null) throw new Error(`Unknown station ${stationId}.`);
+  if (pathResetTimer != null) clearTimeout(pathResetTimer);
+  try {
+    await set(ref(database, `${BMS_PATH}/Execute_Path`), 1);
+    await waitForExecutePathReady();
+    await set(ref(database, `${BMS_PATH}/Path_Name`), pathName);
+  } catch (error) {
+    await update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 }).catch(() => {});
+    throw error;
+  }
+  pathResetTimer = setTimeout(() => {
+    pathResetTimer = null;
+    update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 }).catch((error) => {
+      console.error('Could not reset the five-second path command:', error);
+    });
+  }, PATH_COMMAND_DURATION_MS);
+  return pathName;
+}
+
+export function cancelStationPath() {
+  if (pathResetTimer != null) {
+    clearTimeout(pathResetTimer);
+    pathResetTimer = null;
+  }
+  return update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 });
+}
+
+// Mirror each station's physical switch to its two indicator outputs and relay.
+// A confirmed reservation also turns only its station red when that station's
+// ultrasonic distance drops below 10 cm. The relay continues to follow only
+// the physical switch, so this proximity indication does not change hardware.
+export function syncStationIndicators(switches, slots = [], reservedStationId = null) {
+  const values = {};
+  switches.forEach((value, index) => {
+    if (value === 0 || value === 1) {
+      const stationId = index + 1;
+      const slotValue = slots[index];
+      const reservedAndClose =
+        stationId === reservedStationId &&
+        typeof slotValue === 'number' &&
+        slotValue >= 0 &&
+        slotValue < RESERVED_STATION_RED_DISTANCE_CM;
+      const indicatorEngaged = value === 1 || reservedAndClose;
+
+      values[`green${stationId}`] = indicatorEngaged ? 0 : 1;
+      values[`red${stationId}`] = indicatorEngaged ? 1 : 0;
+      values[`Relay${index + 1}`] = value;
+    }
+  });
+  return Object.keys(values).length > 0 ? update(ref(database, STATIONS_PATH), values) : Promise.resolve();
 }
 
 // ---------------------------------------------------------------------------

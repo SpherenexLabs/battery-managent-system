@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS } from './store.js';
-import { setDirection, subscribeBmsData, subscribeConnection, subscribeRoutes } from './bms.js';
-
-const PLAYBACK_TICK_MS = 100;
+import {
+  setDirection,
+  subscribeBmsData,
+  subscribeConnection,
+  subscribeStationData,
+  syncStationIndicators,
+} from './bms.js';
 
 function getInitialState() {
   const hash = window.location.hash.slice(1);
@@ -21,18 +25,29 @@ export function EvProvider({ children }) {
   // Live BMS telemetry from Firebase Realtime Database
   useEffect(() => {
     const unsubData = subscribeBmsData((data) => dispatch({ type: 'BMS_UPDATE', data }));
+    const unsubStations = subscribeStationData((data) => dispatch({ type: 'STATION_BMS_UPDATE', data }));
     const unsubConn = subscribeConnection((online) => dispatch({ type: 'BMS_CONNECTION', online }));
     return () => {
       unsubData();
+      unsubStations();
       unsubConn();
     };
   }, []);
 
-  // Saved auto-drive routes, mirrored from Firebase so both the Stations
-  // screen (choosing one to reserve with) and Drive Control can see them.
+  // Keep each station's green/red indicators aligned with its physical switch.
+  // For the confirmed reservation only, its SlotN ultrasonic reading below
+  // 10 cm also changes that station from green to red.
+  const stationSwitchSignature = state.stationSwitches.map((value) => value ?? 'x').join(',');
+  const stationSlotSignature = state.slots.map((value) => value ?? 'x').join(',');
+  const reservedStationId = state.reservationStatus === 'confirmed' ? state.selectedStationId : null;
   useEffect(() => {
-    return subscribeRoutes((routes) => dispatch({ type: 'ROUTES_LOADED', routes }));
-  }, []);
+    if (stationSwitchSignature === 'x,x,x,x') return;
+    const switches = stationSwitchSignature.split(',').map((value) => (value === 'x' ? null : Number(value)));
+    const slots = stationSlotSignature.split(',').map((value) => (value === 'x' ? null : Number(value)));
+    syncStationIndicators(switches, slots, reservedStationId).catch((error) => {
+      console.error('Could not sync station engagement indicators:', error);
+    });
+  }, [stationSwitchSignature, stationSlotSignature, reservedStationId]);
 
   // Every drive command the reducer issues — manual joystick, auto-route step,
   // stop — is written to the controller here, so no screen writes it directly.
@@ -40,18 +55,6 @@ export function EvProvider({ children }) {
     if (state.command == null) return;
     setDirection(state.command.direction);
   }, [state.command]);
-
-  // Auto-route playback clock. 100 ms ticks support route steps in 0.1-second increments;
-  // the interval is rebuilt only when playback starts or stops, not per tick.
-  const playbackActive = state.playback != null;
-  useEffect(() => {
-    if (!playbackActive) return undefined;
-    const id = setInterval(
-      () => dispatch({ type: 'PLAYBACK_TICK', elapsedSeconds: PLAYBACK_TICK_MS / 1000 }),
-      PLAYBACK_TICK_MS
-    );
-    return () => clearInterval(id);
-  }, [playbackActive]);
 
   // Vehicle's live position, for distance/direction to charging stations
   useEffect(() => {

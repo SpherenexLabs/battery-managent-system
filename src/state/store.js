@@ -17,6 +17,7 @@ const SOC_VOLTAGE_MAX = 12.6;
 // tune against real fault data / battery datasheet before production use).
 const HISTORY_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const HISTORY_MAX_SAMPLES = 200;
+const STATION_HISTORY_MAX_SAMPLES = 60;
 const VOLTAGE_DROP_THRESHOLD = 1.0; // V, sudden drop between consecutive readings
 const CURRENT_SWING_THRESHOLD = 2.0; // A, abnormal swing between consecutive readings
 const TEMPERATURE_RISE_THRESHOLD = 3.0; // °C, rapid rise between consecutive readings
@@ -88,6 +89,15 @@ const round1 = (v) => Math.round(v * 10) / 10;
 const pushLog = (log, text) => [{ time: Date.now(), text }, ...log].slice(0, 30);
 const trimByWindow = (list, now) => list.filter((t) => now - t <= HISTORY_WINDOW_MS);
 
+function firstNumber(data, keys, fallback = null) {
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  }
+  return fallback;
+}
+
 function socFromVoltage(voltage) {
   const pct = ((voltage - SOC_VOLTAGE_MIN) / (SOC_VOLTAGE_MAX - SOC_VOLTAGE_MIN)) * 100;
   return round1(clamp(pct, 0, 100));
@@ -137,6 +147,9 @@ function nearbyStationName(index, location) {
 // Slot sensors report a distance reading in cm (-1 = no echo / out of range).
 // A reading closer than this means a vehicle is physically present in the slot.
 const OCCUPIED_DISTANCE_CM = 40;
+const RESERVED_STATION_RED_DISTANCE_CM = 10;
+const SHEET_ROUTE_DISTANCE_CM = 160;
+const ARRIVAL_DISTANCE_CM = 8;
 
 function computeStations(state) {
   return STATIONS_BASE.map((base, i) => {
@@ -152,15 +165,25 @@ function computeStations(state) {
             }
           : { lat: base.lat, lng: base.lng };
     const slotValue = state.slots[i];
-    const filledSlots = state.stationOccupancy[i] ?? (slotValue !== -1 && slotValue >= 0 && slotValue <= OCCUPIED_DISTANCE_CM ? 1 : 0);
+    const switchValue = state.stationSwitches[i];
+    const switchEngaged = switchValue === 1;
+    const ultrasonicEngaged =
+      base.id === state.selectedStationId &&
+      state.reservationStatus === 'confirmed' &&
+      typeof slotValue === 'number' &&
+      slotValue >= 0 &&
+      slotValue < RESERVED_STATION_RED_DISTANCE_CM;
+    const indicatorEngaged = switchEngaged || ultrasonicEngaged;
+    const filledSlots = state.stationOccupancy[i] ?? (switchEngaged || (slotValue !== -1 && slotValue >= 0 && slotValue <= OCCUPIED_DISTANCE_CM) ? 1 : 0);
     const totalSlots = state.stationCapacity[i] ?? base.totalSlots;
     const reservationHeld = base.id === state.selectedStationId && state.reservationStatus !== 'none';
     const availableSlots = Math.max(0, totalSlots - filledSlots - (reservationHeld ? 1 : 0));
-    let status = availableSlots > 0 ? 'available' : 'occupied';
+    let status = switchEngaged ? 'engaged' : availableSlots > 0 ? 'available' : 'occupied';
     if (base.id === state.selectedStationId) {
       if (state.vehicleStatus === 'charging') status = 'charging';
       else if (state.reservationStatus !== 'none') status = 'reserved';
     }
+    if (indicatorEngaged && status !== 'charging') status = 'engaged';
     const distance = hasVehicleLocation
       ? distanceKm(state.vehicleLocation.lat, state.vehicleLocation.lng, location.lat, location.lng)
       : null;
@@ -181,9 +204,14 @@ function computeStations(state) {
       current,
       voltage,
       power,
+      switchValue,
+      switchEngaged,
+      ultrasonicEngaged,
+      indicatorEngaged,
+      history: state.stationHistory[i],
       locationSource: reportedLocation != null ? 'iot' : hasVehicleLocation ? 'prototype' : 'default',
     };
-  }).sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
+  });
 }
 
 export function computeAlerts(state) {
@@ -348,6 +376,9 @@ export const initialState = {
   // stations 2-4 only report if StationNCurrent / StationNVoltage are published.
   stationCurrents: [null, null, null, null],
   stationVoltages: [null, null, null, null],
+  stationSwitches: [null, null, null, null],
+  stationHistory: [[], [], [], []],
+  stationDataLoaded: false,
   soc: null,
   soh: null,
 
@@ -355,6 +386,8 @@ export const initialState = {
 
   selectedStationId: null,
   reservationStatus: 'none', // none | pending | confirmed
+  executePath: 0,
+  pathName: 0,
 
   navProgress: 0,
   navStopped: false,
@@ -418,6 +451,8 @@ function reducerInner(state, action) {
       const socSignal = typeof d.SOC === 'number' ? (d.SOC > 0 ? 1 : 0) : state.socSignal;
       const sodSignal = typeof d.SOD === 'number' ? (d.SOD > 0 ? 1 : 0) : state.sodSignal;
       const socCount = typeof d.Count === 'number' ? d.Count : state.socCount;
+      const executePath = typeof d.Execute_Path === 'number' ? (d.Execute_Path > 0 ? 1 : 0) : state.executePath;
+      const pathName = typeof d.Path_Name === 'number' ? Math.round(d.Path_Name) : state.pathName;
       const slots = [0, 1, 2, 3].map((i) => {
         const v = d[`Slot${i + 1}`];
         return typeof v === 'number' ? v : state.slots[i];
@@ -443,13 +478,32 @@ function reducerInner(state, action) {
       // controller's own "Current" and "Voltage2" (the station-side voltage).
       // Stations 2-4 only report if StationNCurrent / StationNVoltage exist.
       const stationCurrents = [0, 1, 2, 3].map((i) => {
+        if (state.stationDataLoaded) return state.stationCurrents[i];
         const value = i === 0 ? d.Current : d[`Station${i + 1}Current`];
         return typeof value === 'number' ? round1(value) : state.stationCurrents[i];
       });
       const stationVoltages = [0, 1, 2, 3].map((i) => {
+        if (state.stationDataLoaded) return state.stationVoltages[i];
         const value = i === 0 ? d.Voltage2 : d[`Station${i + 1}Voltage`];
         return typeof value === 'number' ? round1(value) : state.stationVoltages[i];
       });
+
+      // SlotN is the controller's live vehicle-to-station distance in cm.
+      // Use it for route progress, and treat a very short reading (or the
+      // firmware clearing Execute_Path after a run) as physical arrival.
+      const selectedSlot = state.selectedStationId ? slots[state.selectedStationId - 1] : null;
+      const hasSelectedDistance = typeof selectedSlot === 'number' && selectedSlot >= 0;
+      const distanceProgress = hasSelectedDistance
+        ? clamp(((SHEET_ROUTE_DISTANCE_CM - selectedSlot) / SHEET_ROUTE_DISTANCE_CM) * 100, 0, 100)
+        : state.navProgress;
+      const arrivedFromDistance = state.vehicleStatus === 'moving' && hasSelectedDistance && selectedSlot <= ARRIVAL_DISTANCE_CM;
+      const arrivedFromController = state.vehicleStatus === 'moving' && state.executePath === 1 && executePath === 0;
+      const vehicleStatus = arrivedFromDistance || arrivedFromController ? 'arrived' : state.vehicleStatus;
+      const navProgress = vehicleStatus === 'arrived' ? 100 : distanceProgress;
+      const routeSteps =
+        vehicleStatus === 'arrived'
+          ? { ...state.routeSteps, followingTrack: false, arrived: true }
+          : state.routeSteps;
 
       const soc = voltage == null ? state.soc : socFromVoltage(voltage);
       const soh = temperature == null || voltage == null ? state.soh : sohEstimate(temperature, voltage);
@@ -508,6 +562,8 @@ function reducerInner(state, action) {
         socSignal,
         sodSignal,
         socCount,
+        executePath,
+        pathName,
         slots,
         stationOccupancy,
         stationCapacity,
@@ -517,11 +573,67 @@ function reducerInner(state, action) {
         stationVoltages,
         soc,
         soh,
+        vehicleStatus,
+        navProgress,
+        routeSteps,
         charging,
         eventLog,
         history: { samples, overheatEvents },
         connectivity: { online: true, lastSync: now },
       });
+    }
+
+    case 'STATION_BMS_UPDATE': {
+      const d = action.data || {};
+      const now = Date.now();
+      const stationCurrents = [1, 2, 3, 4].map((stationId, index) => {
+        const value = firstNumber(
+          d,
+          stationId === 1
+            ? ['Current', 'Current1', 'Station1Current']
+            : [`Current${stationId}`, `Station${stationId}Current`],
+          state.stationCurrents[index]
+        );
+        return value == null ? null : round1(value);
+      });
+      const stationVoltages = [1, 2, 3, 4].map((stationId, index) => {
+        const value = firstNumber(
+          d,
+          stationId === 1
+            ? ['Voltage', 'Voltage1', 'Station1Voltage']
+            : [`Voltage${stationId}`, `Station${stationId}Voltage`],
+          state.stationVoltages[index]
+        );
+        return value == null ? null : round1(value);
+      });
+      const stationSwitches = [1, 2, 3, 4].map((stationId, index) => {
+        const value = firstNumber(
+          d,
+          stationId === 1
+            ? ['Switch1', 'Switch', 'switch1', 'switch']
+            : [`Switch${stationId}`, `switch${stationId}`],
+          state.stationSwitches[index]
+        );
+        return value == null ? null : value > 0 ? 1 : 0;
+      });
+      const stationHistory = [0, 1, 2, 3].map((index) => {
+        const current = stationCurrents[index];
+        const voltage = stationVoltages[index];
+        if (current == null && voltage == null) return state.stationHistory[index];
+        const previous = state.stationHistory[index];
+        const last = previous[previous.length - 1];
+        if (last && last.current === current && last.voltage === voltage && now - last.t < 1000) return previous;
+        return [...previous, { t: now, current, voltage }].slice(-STATION_HISTORY_MAX_SAMPLES);
+      });
+
+      return {
+        ...state,
+        stationCurrents,
+        stationVoltages,
+        stationSwitches,
+        stationHistory,
+        stationDataLoaded: true,
+      };
     }
 
     case 'BMS_CONNECTION': {
@@ -681,6 +793,7 @@ function reducerInner(state, action) {
       return {
         ...state,
         vehicleStatus: state.vehicleStatus === 'moving' ? 'idle' : state.vehicleStatus,
+        executePath: 0,
         navStopped: true,
         playback: null,
         routeSteps: { ...state.routeSteps, followingTrack: false },
@@ -698,6 +811,29 @@ function reducerInner(state, action) {
       if (!station || station.status !== 'available') return state;
       if (state.reservationStatus === 'confirmed') return state;
       return { ...state, selectedStationId: action.id, reservationStatus: 'pending' };
+    }
+
+    case 'RESERVE_STATION': {
+      const station = computeStations(state).find((s) => s.id === action.id);
+      if (!station || station.status !== 'available') return state;
+      return {
+        ...state,
+        selectedStationId: action.id,
+        reservationStatus: 'confirmed',
+        executePath: 1,
+        pathName: action.pathName,
+        routeSteps: { reservationConfirmed: true, followingTrack: true, arrived: false },
+        vehicleStatus: 'moving',
+        driveMode: 'auto',
+        navProgress: 0,
+        navStopped: false,
+        screen: 'stations',
+        playback: null,
+        eventLog: pushLog(
+          state.eventLog,
+          `Reservation confirmed for Station ${station.id} — controller path ${action.pathName} started.`
+        ),
+      };
     }
 
     case 'CONFIRM_RESERVATION': {

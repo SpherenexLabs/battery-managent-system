@@ -5,7 +5,7 @@ import { formatClock } from '../utils/format.js';
 const NAV_ITEMS = [
   { id: 'overview', label: 'Overview', Icon: IconHome },
   { id: 'stations', label: 'Stations', Icon: IconStation },
-  { id: 'navigation', label: 'Navigation', Icon: IconNav },
+  { id: 'navigation', label: 'Vehicle Tracking', Icon: IconNav },
   { id: 'charging', label: 'Charging', Icon: IconBolt },
   { id: 'thermal', label: 'Thermal Control', Icon: IconThermo },
   { id: 'health', label: 'Health & Alerts', Icon: IconBell },

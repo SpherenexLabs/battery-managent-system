@@ -10,9 +10,9 @@ const SHEET_WIDTH_CM = 120;
 const SHEET_LENGTH_CM = 160;
 const SHEET_WIDTH = SHEET_WIDTH_CM / CM_PER_UNIT;
 const SHEET_LENGTH = SHEET_LENGTH_CM / CM_PER_UNIT;
-const X_LIMIT = SHEET_WIDTH / 2;
-const Z_LIMIT = SHEET_LENGTH / 2;
-const ROUTE_START = { x: 0, z: -SHEET_LENGTH / 2 };
+// Keep the whole vehicle on the board. The model is 3.6 units long, so its
+// centre must remain at least 1.8 units inside the 160 cm boundary.
+const ROUTE_START = { x: 0, z: -SHEET_LENGTH / 2 + 2.25 };
 
 // Fixed charging-pad positions on the demonstration sheet.
 const STATION_SPOTS = {
@@ -22,9 +22,6 @@ const STATION_SPOTS = {
   4: { x: -3.5, z: 5.4 },
 };
 
-const DRIVE_SPEED_CM_PER_SECOND = 32; // calibrate this to the physical vehicle if needed
-const DRIVE_SPEED = DRIVE_SPEED_CM_PER_SECOND / CM_PER_UNIT;
-const TURN_RATE = 1.5; // radians per second while turning
 const MAX_TRAIL_POINTS = 12000;
 
 const COLORS = {
@@ -82,6 +79,46 @@ function makeVehicle() {
   return { car, wheels, body };
 }
 
+function makeVoltageLabel(stationId) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 384;
+  canvas.height = 112;
+  const context = canvas.getContext('2d');
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
+  );
+  sprite.position.set(0, 4.3, 0);
+  sprite.scale.set(3.8, 1.12, 1);
+  sprite.renderOrder = 20;
+  sprite.userData = { canvas, context, texture, stationId, lastText: null };
+  updateVoltageLabel(sprite, null);
+  return sprite;
+}
+
+function updateVoltageLabel(sprite, voltage) {
+  const { canvas, context, texture, stationId } = sprite.userData;
+  const text = Number.isFinite(voltage) ? `S${stationId}   ${voltage.toFixed(2)} V` : `S${stationId}   — V`;
+  if (sprite.userData.lastText === text) return;
+  sprite.userData.lastText = text;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = 'rgba(7, 18, 32, 0.94)';
+  context.strokeStyle = Number.isFinite(voltage) ? '#5eead4' : '#64748b';
+  context.lineWidth = 5;
+  context.beginPath();
+  context.roundRect(7, 7, canvas.width - 14, canvas.height - 14, 24);
+  context.fill();
+  context.stroke();
+  context.fillStyle = '#f8fafc';
+  context.font = '700 42px system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
+  texture.needsUpdate = true;
+}
+
 function makeStation(label, isTarget) {
   const group = new THREE.Group();
 
@@ -127,7 +164,17 @@ function makeStation(label, isTarget) {
   screen.position.set(0, 2.78, -2.23);
   group.add(screen);
 
-  group.userData = { ring, pad, head, screen, label };
+  const voltageBeam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.12, 0.42, 1.8, 20, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.08, depthWrite: false })
+  );
+  voltageBeam.position.y = 1.05;
+  group.add(voltageBeam);
+
+  const voltageLabel = makeVoltageLabel(Number(label.replace('S', '')));
+  group.add(voltageLabel);
+
+  group.userData = { ring, pad, head, screen, voltageBeam, voltageLabel, label };
   return group;
 }
 
@@ -198,38 +245,6 @@ function makeCarMarker() {
   return marker;
 }
 
-function calculateGuidancePath(drive, step, remaining) {
-  if (!step || step.direction === 'S') return [];
-  const points = [new THREE.Vector3(drive.x, 0.1, drive.z)];
-
-  if (step.direction === 'F' || step.direction === 'B') {
-    const sign = step.direction === 'B' ? -1 : 1;
-    const distance = DRIVE_SPEED * Math.max(0, Number(remaining) || 0) * sign;
-    const x = Math.max(-X_LIMIT, Math.min(X_LIMIT, drive.x + Math.sin(drive.heading) * distance));
-    const z = Math.max(-Z_LIMIT, Math.min(Z_LIMIT, drive.z + Math.cos(drive.heading) * distance));
-    points.push(new THREE.Vector3(x, 0.1, z));
-    return points;
-  }
-
-  // A short curved guide beside the car communicates an in-place turn
-  // without revealing any later route segment.
-  const sign = step.direction === 'L' ? 1 : -1;
-  const turn = Math.min(Math.PI * 1.5, TURN_RATE * Math.max(0, Number(remaining) || 0));
-  for (let i = 1; i <= 14; i += 1) {
-    const progress = i / 14;
-    const radius = 0.75 * progress;
-    const angle = drive.heading + sign * turn * progress;
-    points.push(
-      new THREE.Vector3(
-        drive.x + Math.sin(angle) * radius,
-        0.1,
-        drive.z + Math.cos(angle) * radius
-      )
-    );
-  }
-  return points;
-}
-
 export default function VehicleScene({ mode = 'drive', height = 320 }) {
   const state = useEvState();
   const mountRef = useRef(null);
@@ -261,7 +276,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth || 640, mount.clientHeight || height);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -339,22 +354,22 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
     Object.entries(STATION_SPOTS).forEach(([id, spot]) => {
       const station = makeStation(`S${id}`, Number(id) === selectedId);
       station.position.set(spot.x, 0, spot.z);
-      station.visible = mode === 'charge';
+      station.visible = true;
       scene.add(station);
       stations[id] = station;
     });
 
     const { car, wheels } = makeVehicle();
-    car.visible = mode === 'charge';
+    car.visible = true;
     scene.add(car);
 
     const carMarker = makeCarMarker();
-    carMarker.visible = mode === 'drive';
+    carMarker.visible = false;
     scene.add(carMarker);
 
     const startMarker = makeFloorMarker(0x22c55e);
     startMarker.position.set(ROUTE_START.x, 0.08, ROUTE_START.z);
-    startMarker.visible = mode === 'drive';
+    startMarker.visible = mode !== 'charge';
     scene.add(startMarker);
 
     const endMarker = makeFloorMarker(0xef4444, 0.46);
@@ -380,7 +395,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
       trailGeometry,
       new THREE.LineBasicMaterial({ color: 0x5eead4, transparent: true, opacity: 0.9 })
     );
-    trail.visible = mode === 'drive';
+    trail.visible = mode !== 'charge';
     scene.add(trail);
 
     const energy = makeEnergyRings();
@@ -392,20 +407,15 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
     controls.target.set(0, 1, 0);
     controls.update();
     const home = { position: camera.position.clone(), target: controls.target.clone() };
-    const clock = new THREE.Clock();
+    const timer = new THREE.Timer();
+    timer.connect(document);
     let raf;
     let lastTargetId = selectedId;
     let trailCount = 0;
     let lastTrailX = drive.x;
     let lastTrailZ = drive.z;
     let routeWasActive = false;
-
-    function updateGuidancePath(step, remaining) {
-      const points = calculateGuidancePath(drive, step, remaining);
-      guidanceGeometry.setFromPoints(points);
-      guidancePath.computeLineDistances();
-      guidancePath.visible = mode === 'drive' && points.length > 1;
-    }
+    let visualProgress = 0;
 
     function resetTrail() {
       trailCount = 1;
@@ -448,22 +458,23 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
       if (endReadoutRef.current) endReadoutRef.current.textContent = 'Start: bottom centre (60 cm, 0 cm)';
     };
 
-    function frame() {
+    function frame(timestamp) {
       raf = requestAnimationFrame(frame);
-      const dt = Math.min(clock.getDelta(), 0.05);
+      timer.update(timestamp);
+      const dt = Math.min(timer.getDelta(), 0.05);
       const live = liveRef.current;
       const charging = live.vehicleStatus === 'charging';
       const target = live.selectedStationId;
-      const routeActive = !!live.playback;
+      const routeActive = live.vehicleStatus === 'moving' && target != null;
       const routeJustStarted = routeActive && !routeWasActive;
       const routeJustEnded = !routeActive && routeWasActive;
-      const activeRouteStep = live.playback?.steps?.[live.playback.stepIndex];
 
-      if (routeJustStarted && mode === 'drive') {
+      if (routeJustStarted && mode !== 'charge') {
         drive.x = ROUTE_START.x;
         drive.z = ROUTE_START.z;
         drive.heading = 0;
         drive.speed = 0;
+        visualProgress = 0;
         startMarker.position.set(ROUTE_START.x, 0.08, ROUTE_START.z);
         endMarker.visible = false;
         resetTrail();
@@ -471,17 +482,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
       }
       routeWasActive = routeActive;
 
-      // Re-highlight stations when the reserved one changes.
-      if (target !== lastTargetId) {
-        Object.entries(stations).forEach(([id, station]) => {
-          const isTarget = Number(id) === target;
-          station.userData.ring.material.color.setHex(isTarget ? COLORS.accent : COLORS.idle);
-          station.userData.pad.material.color.setHex(isTarget ? COLORS.accent : 0x334155);
-          station.userData.head.material.color.setHex(isTarget ? COLORS.accent : 0x475569);
-          station.userData.screen.material.color.setHex(isTarget ? 0x5eead4 : 0x1e293b);
-        });
-        lastTargetId = target;
-      }
+      if (target !== lastTargetId) lastTargetId = target;
 
       const spot = target ? STATION_SPOTS[target] : null;
 
@@ -490,25 +491,41 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
         drive.x += (spot.x - drive.x) * Math.min(1, dt * 2.5);
         drive.z += (spot.z - drive.z) * Math.min(1, dt * 2.5);
         drive.speed *= 0.85;
-      } else if (mode === 'drive') {
-        // Only the active mapped route moves the car marker. Left/right rotate its
-        // internal heading; forward/backward move for the exact saved duration.
-        const d = activeRouteStep?.direction || 'S';
-        const wanted = d === 'F' ? DRIVE_SPEED : d === 'B' ? -DRIVE_SPEED : 0;
-        drive.speed = wanted;
-        if (d === 'L') drive.heading += TURN_RATE * dt;
-        if (d === 'R') drive.heading -= TURN_RATE * dt;
+      } else if (spot) {
+        const selectedSlot = live.slots?.[target - 1];
+        const sensorAvailable = typeof selectedSlot === 'number' && selectedSlot >= 0;
+        const reportedProgress = Math.max(0, Math.min(1, (live.navProgress || 0) / 100));
+        if (live.vehicleStatus === 'arrived' || charging) visualProgress = 1;
+        else if (routeActive && sensorAvailable) visualProgress += (reportedProgress - visualProgress) * Math.min(1, dt * 5);
+        else if (routeActive) visualProgress = Math.min(0.94, visualProgress + dt * 0.065);
 
-        drive.x += Math.sin(drive.heading) * drive.speed * dt;
-        drive.z += Math.cos(drive.heading) * drive.speed * dt;
-        drive.x = Math.max(-X_LIMIT, Math.min(X_LIMIT, drive.x));
-        drive.z = Math.max(-Z_LIMIT, Math.min(Z_LIMIT, drive.z));
+        const t = Math.max(0, Math.min(1, visualProgress));
+        const inv = 1 - t;
+        const controlX = spot.x * 0.16;
+        const controlZ = -0.4;
+        const previousX = drive.x;
+        const previousZ = drive.z;
+        drive.x = inv * inv * ROUTE_START.x + 2 * inv * t * controlX + t * t * spot.x;
+        drive.z = inv * inv * ROUTE_START.z + 2 * inv * t * controlZ + t * t * spot.z;
+        const dx = drive.x - previousX;
+        const dz = drive.z - previousZ;
+        drive.speed = Math.hypot(dx, dz) / Math.max(dt, 0.001);
+        if (Math.abs(dx) + Math.abs(dz) > 0.0001) drive.heading = Math.atan2(dx, dz);
       }
 
-      updateGuidancePath(activeRouteStep, live.playback?.remaining);
-      if (mode === 'drive' && routeActive) extendTrail();
+      if (spot && routeActive) {
+        guidanceGeometry.setFromPoints([
+          new THREE.Vector3(drive.x, 0.1, drive.z),
+          new THREE.Vector3(spot.x, 0.1, spot.z),
+        ]);
+        guidancePath.computeLineDistances();
+        guidancePath.visible = mode !== 'charge';
+      } else {
+        guidancePath.visible = false;
+      }
+      if (mode !== 'charge' && routeActive) extendTrail();
 
-      if (mode === 'drive' && routeJustEnded) {
+      if (mode !== 'charge' && routeJustEnded) {
         endMarker.position.set(drive.x, 0.08, drive.z);
         endMarker.visible = true;
         const sheetX = (drive.x + SHEET_WIDTH / 2) * CM_PER_UNIT;
@@ -520,13 +537,11 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
 
       carMarker.position.set(drive.x, 0.16, drive.z);
       carMarker.rotation.y = drive.heading;
-      if (mode === 'charge') {
-        car.position.set(drive.x, 0, drive.z);
-        car.rotation.y = drive.heading;
-        wheels.forEach((w) => {
-          w.rotation.x -= drive.speed * dt * 2.6;
-        });
-      }
+      car.position.set(drive.x, 0, drive.z);
+      car.rotation.y = drive.heading;
+      wheels.forEach((wheel) => {
+        wheel.rotation.x -= drive.speed * dt * 2.6;
+      });
 
       // Wireless charging: rings climb from the pad to the car.
       energy.visible = mode === 'charge' && charging && !!spot;
@@ -543,16 +558,33 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
         });
       }
 
-      // Station rings pulse; the reserved one pulses brighter.
+      // SwitchN = 1 turns a station red. A reserved station also turns red when
+      // its ultrasonic reading is below 10 cm. The translucent beam follows
+      // live station voltage so power changes are visible in the 3D map.
       Object.entries(stations).forEach(([id, station]) => {
+        const stationState = live.stations?.find((item) => item.id === Number(id));
         const isTarget = Number(id) === target;
-        const pulse = 0.55 + 0.45 * Math.sin(clock.elapsedTime * (isTarget ? 3 : 1.2) + Number(id));
-        station.userData.ring.material.opacity = isTarget ? 0.45 + 0.5 * pulse : 0.22;
+        const engaged = stationState?.indicatorEngaged === true;
+        const knownReady = stationState?.switchValue === 0 && !engaged;
+        const statusColor = engaged ? COLORS.danger : knownReady ? COLORS.ok : COLORS.idle;
+        const pulse = 0.55 + 0.45 * Math.sin(timer.getElapsed() * (isTarget ? 3 : 1.4) + Number(id));
+        station.userData.ring.material.color.setHex(isTarget && !engaged ? COLORS.accent : statusColor);
+        station.userData.pad.material.color.setHex(statusColor);
+        station.userData.head.material.color.setHex(engaged ? COLORS.danger : isTarget ? COLORS.accent : statusColor);
+        station.userData.screen.material.color.setHex(engaged ? 0xfca5a5 : knownReady ? 0x86efac : 0x1e293b);
+        station.userData.ring.material.opacity = isTarget || engaged ? 0.45 + 0.5 * pulse : 0.24 + 0.18 * pulse;
+
+        const voltage = Math.max(0, Number(stationState?.voltage) || 0);
+        const voltageLevel = Math.min(1, voltage / 15);
+        updateVoltageLabel(station.userData.voltageLabel, stationState?.voltage);
+        station.userData.voltageBeam.material.color.setHex(engaged ? COLORS.danger : COLORS.ok);
+        station.userData.voltageBeam.material.opacity = voltage > 0 ? 0.1 + voltageLevel * (0.25 + 0.15 * pulse) : 0.035;
+        station.userData.voltageBeam.scale.y = 0.3 + voltageLevel * 1.25;
       });
 
       // The orbit target tracks the subject — the docked pad while charging,
       // otherwise the vehicle — so looking around never loses it off-screen.
-      if (mode === 'charge' && charging && spot) camTarget.set(spot.x, 1, spot.z);
+      if ((mode === 'charge' || mode === 'stations') && spot) camTarget.set(spot.x, 1, spot.z);
       else camTarget.set(drive.x, 1, drive.z);
 
       // Move the camera with the target so the operator's chosen angle and
@@ -585,6 +617,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
 
     return () => {
       cancelAnimationFrame(raf);
+      timer.dispose();
       observer.disconnect();
       controls.removeEventListener('start', onControlStart);
       controls.dispose();
@@ -626,12 +659,12 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
           <span><i className="actual" /> Actual</span>
         </div>
       )}
-      {mode === 'drive' && state.playback && (
+      {mode === 'drive' && state.selectedStationId && (
         <div className="scene3d-route-live">
-          <strong>{state.playback.kind === 'test' ? 'Test route' : state.playback.label}</strong>
+          <strong>Station {state.selectedStationId} · Path {state.pathName || '—'}</strong>
           <span>
-            Step {state.playback.stepIndex + 1}/{state.playback.steps.length} ·{' '}
-            {state.playback.steps[state.playback.stepIndex]?.direction} · {state.playback.remaining}s
+            {Math.round(state.navProgress)}% · Slot distance{' '}
+            {state.slots[state.selectedStationId - 1] >= 0 ? `${state.slots[state.selectedStationId - 1]} cm` : 'waiting'}
           </span>
         </div>
       )}
@@ -643,7 +676,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
         <button
           type="button"
           className="scene3d-reset scene3d-point-reset"
-          disabled={!!state.playback}
+          disabled={state.vehicleStatus === 'moving'}
           onClick={() => pointResetRef.current?.()}
         >
           Reset point
