@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
-import { EvDispatchContext, EvStateContext, initialState, reducer, SCREEN_IDS } from './store.js';
 import {
+  EvDispatchContext,
+  EvStateContext,
+  initialState,
+  isChargingCoolingActive,
+  reducer,
+  SCREEN_IDS,
+} from './store.js';
+import {
+  initializeStationPath,
+  reserveStationPath,
   setFanRelay,
   setDirection,
   setHeat,
   setPumpRelay,
+  setStationChargingRelay,
   setTemperature,
   subscribeBmsData,
   subscribeConnection,
@@ -20,7 +30,8 @@ function getInitialState() {
 export function EvProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, undefined, getInitialState);
   const arrivalTimers = useRef([]);
-  const chargingCoolingWasActive = useRef(false);
+  const startupOutputsReset = useRef(false);
+  const refreshPathReplayStarted = useRef(false);
 
   useEffect(() => {
     const id = setInterval(() => dispatch({ type: 'TICK' }), 1000);
@@ -39,6 +50,64 @@ export function EvProvider({ children }) {
     };
   }, []);
 
+  // Do not inherit stale cooling/heater outputs after a browser refresh. New
+  // charging or manual thermal actions will explicitly turn them back on.
+  useEffect(() => {
+    if (!state.connectivity.online || startupOutputsReset.current) return;
+    startupOutputsReset.current = true;
+    Promise.all([setPumpRelay(false), setFanRelay(false), setHeat(0)]).catch((error) => {
+      console.error('Could not reset startup thermal outputs:', error);
+    });
+  }, [state.connectivity.online]);
+
+  // A Firebase value that survives a browser reload restores the reservation,
+  // but writing the same Path_Name again would normally create no new command.
+  // Replay it once per page load as 0 -> station number so the controller sees
+  // a fresh edge and resumes the selected route.
+  useEffect(() => {
+    if (
+      refreshPathReplayStarted.current ||
+      !state.connectivity.online ||
+      !state.stationDataLoaded ||
+      !state.reservationRestoredFromFirebase ||
+      state.reservationStatus !== 'confirmed' ||
+      state.selectedStationId == null
+    ) {
+      return;
+    }
+
+    refreshPathReplayStarted.current = true;
+    const stationId = state.selectedStationId;
+    const selectedSlot = state.slots[stationId - 1];
+    const alreadyAtStation =
+      typeof selectedSlot === 'number' && selectedSlot > 0 && selectedSlot < 20;
+
+    if (alreadyAtStation || state.charging.active || state.charging.relayRequested) {
+      return;
+    }
+
+    async function replayPathAfterRefresh() {
+      const controllerReady = state.executePathStatus?.trim().toLowerCase() === 'ready';
+      if (!controllerReady) await initializeStationPath();
+      const pathName = await reserveStationPath(stationId);
+      dispatch({ type: 'RETRY_STATION_PATH', id: stationId, pathName });
+    }
+
+    replayPathAfterRefresh().catch((error) => {
+      console.error(`Could not replay Station ${stationId} path after refresh:`, error);
+    });
+  }, [
+    state.charging.active,
+    state.charging.relayRequested,
+    state.connectivity.online,
+    state.executePathStatus,
+    state.reservationRestoredFromFirebase,
+    state.reservationStatus,
+    state.selectedStationId,
+    state.slots,
+    state.stationDataLoaded,
+  ]);
+
   // Keep every station's green/red indicators aligned with its physical switch
   // and SlotN ultrasonic reading. A valid reading below 20 cm turns it red.
   const stationSwitchSignature = state.stationSwitches.map((value) => value ?? 'x').join(',');
@@ -47,8 +116,8 @@ export function EvProvider({ children }) {
   const reservedStationId = state.reservationStatus === 'confirmed' ? state.selectedStationId : null;
   // Request the station relay first. Charging becomes active only after the
   // /BMS/RelayN feedback confirms that this output is actually ON. The reducer
-  // only creates this request after a valid ultrasonic reading below 20 cm; once
-  // created, keep it latched despite later sensor fluctuations.
+  // only creates this request while a valid ultrasonic reading is below 20 cm.
+  // Moving to 20 cm or farther clears the request and turns every relay OFF.
   const chargingStationId =
     state.charging.relayRequested ? state.selectedStationId : null;
   useEffect(() => {
@@ -59,6 +128,21 @@ export function EvProvider({ children }) {
       console.error('Could not sync station engagement indicators:', error);
     });
   }, [stationSwitchSignature, stationSlotSignature, stationRelaySignature, reservedStationId, chargingStationId]);
+
+  // Explicitly energise the charging relay selected by the physical ultrasonic
+  // arrival. This is intentionally separate from indicator syncing so a stale
+  // reservation cannot prevent the detected station relay from switching ON.
+  useEffect(() => {
+    if (!state.connectivity.online) return;
+    setStationChargingRelay(chargingStationId, chargingStationId != null).catch((error) => {
+      console.error(
+        chargingStationId == null
+          ? 'Could not reset station charging relays:'
+          : `Could not exclusively turn Station ${chargingStationId} charging relay ON:`,
+        error
+      );
+    });
+  }, [chargingStationId, state.connectivity.online]);
 
   // Recover from Firebase callback ordering where RelayN feedback can reach
   // React just before the reducer's relay-confirmation transition. If charging
@@ -99,14 +183,7 @@ export function EvProvider({ children }) {
 
   useEffect(() => {
     if (!state.connectivity.online) return;
-    if (
-      !state.thermalSimulationActive &&
-      !state.manualFanOn &&
-      !state.movementFanCycleActive &&
-      !state.charging.active &&
-      state.fanRelay !== 0
-    ) return;
-    setFanRelay(state.charging.active || state.fanRelay === 1).catch((error) => {
+    setFanRelay(state.fanRelay === 1).catch((error) => {
       console.error('Could not write automatic fan state:', error);
     });
   }, [
@@ -114,26 +191,46 @@ export function EvProvider({ children }) {
     state.connectivity.online,
     state.fanRelay,
     state.manualFanOn,
-    state.movementFanCycleActive,
     state.thermalSimulationActive,
+    state.vehicleStatus,
   ]);
 
-  // Relay-confirmed charging always runs the liquid-cooling pump. Only turn it
-  // back OFF when a charging session that was previously active ends.
+  // Vehicle movement keeps both cooling relays OFF. Charging turns both ON
+  // after five seconds; manual and temperature-safety cooling turn them on
+  // immediately. The pump follows the same automatic request as the fan.
+  const chargingCoolingActive = isChargingCoolingActive(
+    state.charging,
+    state.clock.getTime()
+  );
+  const automaticCoolingRequested =
+    (chargingCoolingActive || state.manualFanOn || state.temperatureFanActive);
   useEffect(() => {
     if (!state.connectivity.online) return;
-    const wasActive = chargingCoolingWasActive.current;
-    if (state.charging.active && state.pumpRelay !== 1) {
-      setPumpRelay(true).catch((error) => {
-        console.error('Could not turn the charging coolant pump ON:', error);
-      });
-    } else if (!state.charging.active && wasActive) {
+    if (
+      state.vehicleStatus === 'moving' &&
+      !state.manualFanOn &&
+      !state.temperatureFanActive
+    ) {
       setPumpRelay(false).catch((error) => {
-        console.error('Could not turn the charging coolant pump OFF:', error);
+        console.error('Could not turn the coolant pump OFF while driving:', error);
+      });
+    } else if (automaticCoolingRequested && state.pumpRelay !== 1) {
+      setPumpRelay(true).catch((error) => {
+        console.error('Could not turn the coolant pump ON:', error);
+      });
+    } else if (!automaticCoolingRequested) {
+      setPumpRelay(false).catch((error) => {
+        console.error('Could not turn the coolant pump OFF:', error);
       });
     }
-    chargingCoolingWasActive.current = state.charging.active;
-  }, [state.charging.active, state.connectivity.online, state.pumpRelay]);
+  }, [
+    automaticCoolingRequested,
+    state.connectivity.online,
+    state.manualFanOn,
+    state.pumpRelay,
+    state.temperatureFanActive,
+    state.vehicleStatus,
+  ]);
 
   useEffect(() => {
     if (!state.thermalSimulationActive || !state.connectivity.online) return;

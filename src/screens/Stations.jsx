@@ -2,7 +2,12 @@ import { useState } from 'react';
 import { useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote, StatusDot } from '../components/ui.jsx';
 import { IconBolt, IconCheck, IconPulse, IconStation, IconTarget } from '../components/icons.jsx';
-import { initializeStationPath, reserveStationPath, STATION_PATH_NAME } from '../state/bms.js';
+import {
+  initializeStationPath,
+  releaseStationReservation,
+  reserveStationPath,
+  STATION_PATH_NAME,
+} from '../state/bms.js';
 import Scene3D from '../components/Scene3D.jsx';
 
 const STATION_META = {
@@ -10,6 +15,7 @@ const STATION_META = {
   occupied: { label: 'Occupied', color: 'red' },
   engaged: { label: 'Engaged', color: 'red' },
   reserved: { label: 'Vehicle en route', color: 'blue' },
+  connecting: { label: 'Starting charge', color: 'teal' },
   charging: { label: 'Charging', color: 'teal' },
 };
 
@@ -17,20 +23,16 @@ export default function Stations() {
   const state = useEvState();
   const dispatch = useEvDispatch();
   const [busyAction, setBusyAction] = useState(null);
-  const [controllerInitialized, setControllerInitialized] = useState(false);
   const [error, setError] = useState('');
   const controllerReady = state.executePathStatus?.trim().toLowerCase() === 'ready';
-  const initializationComplete = controllerInitialized || controllerReady;
 
-  async function initializePath(station) {
-    if (busyAction != null || station.status !== 'available') return;
-    setBusyAction({ id: station.id, type: 'initialize' });
+  async function initializePath() {
+    if (busyAction != null) return;
+    setBusyAction({ type: 'initialize' });
     setError('');
     try {
       await initializeStationPath();
-      setControllerInitialized(true);
     } catch (requestError) {
-      setControllerInitialized(false);
       setError(requestError?.message || 'Firebase did not accept Execute_Path = 1.');
     } finally {
       setBusyAction(null);
@@ -38,10 +40,14 @@ export default function Stations() {
   }
 
   async function reserveAndGo(station) {
-    if (busyAction != null || station.status !== 'available' || !controllerReady) return;
+    if (busyAction != null || station.status !== 'available') return;
     setBusyAction({ id: station.id, type: 'reserve' });
     setError('');
     try {
+      // A path command cannot run until the controller has completed its
+      // one-time Execute_Path handshake. Reserve performs it automatically
+      // only when needed; all later stations reuse the same Ready state.
+      if (!controllerReady) await initializeStationPath();
       const pathName = await reserveStationPath(station.id);
       dispatch({ type: 'RESERVE_STATION', id: station.id, pathName });
     } catch (requestError) {
@@ -51,12 +57,60 @@ export default function Stations() {
     }
   }
 
+  async function retryPath(station) {
+    if (busyAction != null) return;
+    setBusyAction({ id: station.id, type: 'retry' });
+    setError('');
+    try {
+      if (!controllerReady) await initializeStationPath();
+      await reserveStationPath(station.id);
+      dispatch({ type: 'RETRY_STATION_PATH', id: station.id });
+    } catch (requestError) {
+      setError(requestError?.message || 'Firebase did not accept the station Path_Name again.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function cancelReservation(station) {
+    if (busyAction != null) return;
+    setBusyAction({ id: station.id, type: 'cancel' });
+    setError('');
+    try {
+      await releaseStationReservation();
+      dispatch({ type: 'CANCEL_STATION_RESERVATION' });
+    } catch (requestError) {
+      setError(requestError?.message || 'Could not release the station reservation.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   return (
     <div className="screen stations-screen">
       <PageHeader
         title="4 Live Charging Stations"
-        subtitle="Initialize Execute_Path first. When the controller reports Ready, reserve a station to send its number as Path_Name."
+        subtitle="Initialize once, then reserve any station. Reserve also completes initialization automatically when needed."
       />
+
+      <div className="station-initialize-bar">
+        <div>
+          <strong>Controller initialization</strong>
+          <span>{controllerReady ? 'Execute_Path is Ready' : 'Optional: send Execute_Path = 1'}</span>
+        </div>
+        <button
+          type="button"
+          className="btn btn-outline"
+          disabled={busyAction != null || controllerReady}
+          onClick={initializePath}
+        >
+          {controllerReady
+            ? 'Initialized'
+            : busyAction?.type === 'initialize'
+              ? 'Waiting for Ready…'
+              : 'Initialize Controller'}
+        </button>
+      </div>
 
       {error && (
         <InfoNote tone="warning" title="Station command failed">
@@ -75,15 +129,15 @@ export default function Stations() {
         {state.stations.map((station) => {
           const meta = STATION_META[station.status] || STATION_META.available;
           const isSelected = station.id === state.selectedStationId;
-          const isInitializing = busyAction?.id === station.id && busyAction.type === 'initialize';
           const isReserving = busyAction?.id === station.id && busyAction.type === 'reserve';
-          const isInitialized = initializationComplete;
-          const canOperate =
+          const isRetrying = busyAction?.id === station.id && busyAction.type === 'retry';
+          const isCancelling = busyAction?.id === station.id && busyAction.type === 'cancel';
+          const isActiveReservation =
+            isSelected && state.reservationStatus === 'confirmed';
+          const canReserve =
             station.status === 'available' &&
             state.reservationStatus !== 'confirmed' &&
             busyAction == null;
-          const canInitialize = canOperate && !isInitialized;
-          const canReserve = canOperate && isInitialized;
           return (
             <article
               key={station.id}
@@ -150,22 +204,35 @@ export default function Stations() {
               </div>
 
               <div className="station-actions">
-                <button
-                  type="button"
-                  className="btn btn-outline"
-                  disabled={!canInitialize}
-                  onClick={() => initializePath(station)}
-                >
-                  {isInitializing ? 'Waiting for Ready…' : isInitialized ? 'Initialized' : 'Initialize'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-accent"
-                  disabled={!canReserve}
-                  onClick={() => reserveAndGo(station)}
-                >
-                  {isReserving ? 'Reserving…' : isSelected ? 'Reserved' : `Reserve Station ${station.id}`}
-                </button>
+                {isActiveReservation ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-accent"
+                      disabled={busyAction != null}
+                      onClick={() => retryPath(station)}
+                    >
+                      {isRetrying ? 'Sending Path…' : `Retry Path ${STATION_PATH_NAME[station.id]}`}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={busyAction != null}
+                      onClick={() => cancelReservation(station)}
+                    >
+                      {isCancelling ? 'Cancelling…' : 'Cancel Reservation'}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-accent"
+                    disabled={!canReserve}
+                    onClick={() => reserveAndGo(station)}
+                  >
+                    {isReserving ? 'Reserving…' : `Reserve Station ${station.id}`}
+                  </button>
+                )}
               </div>
             </article>
           );

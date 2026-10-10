@@ -1,7 +1,13 @@
-import { getChargingPower, useEvDispatch, useEvState } from '../state/store.js';
+import {
+  CHARGING_COOLING_DELAY_MS,
+  getChargingPower,
+  isChargingCoolingActive,
+  THERMAL_LIMITS,
+  useEvDispatch,
+  useEvState,
+} from '../state/store.js';
 import { InfoNote, PageHeader, ProgressBar } from '../components/ui.jsx';
 import { IconCar, IconCheck, IconTarget } from '../components/icons.jsx';
-import { THERMAL_LIMITS } from '../state/store.js';
 import Scene3D from '../components/Scene3D.jsx';
 
 const MODE_LABEL = {
@@ -22,10 +28,23 @@ export default function Charging() {
   const chargePct = state.soc ?? 0;
   const chargingPower = getChargingPower(state);
   const livePower = chargingPower.watts;
+  const powerLabel =
+    chargingPower.source === 'predicted'
+      ? 'Predicted charging power'
+      : chargingPower.source === 'station'
+        ? 'Live station power'
+        : 'Live BMS power';
+  const energyLabel =
+    chargingPower.source === 'predicted' ? 'Energy delivered (estimated)' : 'Energy delivered';
   const sessionSeconds =
     charging.active && charging.sessionStartedAt != null
       ? Math.max(0, Math.floor((state.clock.getTime() - charging.sessionStartedAt) / 1000))
       : 0;
+  const chargingCoolingActive = isChargingCoolingActive(charging, state.clock.getTime());
+  const coolingDelaySeconds = Math.max(
+    0,
+    Math.ceil(CHARGING_COOLING_DELAY_MS / 1000 - sessionSeconds)
+  );
   const energyDeliveredWh = Number.isFinite(charging.energyWh) ? charging.energyWh : 0;
   const vehicleFull = charging.mode === 'complete' || (state.soc != null && state.soc >= 100);
   const selectedRelayValue =
@@ -44,9 +63,9 @@ export default function Charging() {
       )}
 
       <Scene3D
-        title="Live Vehicle Route Position"
-        hint="The same 120 × 160 cm car map and step-by-step guidance used throughout the dashboard."
-        mode="drive"
+        title="Live Wireless Charging Animation"
+        hint="The docked vehicle and charging-energy animation update from the live session state."
+        mode="charge"
       />
 
       <div className="charge-layout">
@@ -71,6 +90,9 @@ export default function Charging() {
               <span className="text-warn">
                 <IconCheck className="kv-icon warn" /> Cooling Active (pump {state.pumpRelay ? 'ON' : 'OFF'} · fan {state.fanRelay ? 'ON' : 'OFF'})
               </span>
+            )}
+            {charging.active && !chargingCoolingActive && !coolingActive && (
+              <span className="muted">Pump and fan start in {coolingDelaySeconds}s</span>
             )}
           </div>
 
@@ -103,8 +125,8 @@ export default function Charging() {
             </div>
             <div className="charge-session-stats">
               <SessionStat label="Session time" value={formatDuration(sessionSeconds)} />
-              <SessionStat label="Live BMS power" value={`${livePower.toFixed(1)} W`} />
-              <SessionStat label="Energy delivered" value={`${energyDeliveredWh.toFixed(3)} Wh`} />
+              <SessionStat label={powerLabel} value={`${livePower.toFixed(1)} W`} />
+              <SessionStat label={energyLabel} value={`${energyDeliveredWh.toFixed(3)} Wh`} />
               <SessionStat label="BMS SOC" value={state.soc != null ? `${Math.round(state.soc)}% live` : 'Waiting'} />
               <SessionStat label="Vehicle voltage" value={state.voltage != null ? `${state.voltage.toFixed(2)} V` : '—'} />
               <SessionStat label="Current" value={state.current != null ? `${state.current.toFixed(2)} A` : '—'} />
@@ -137,7 +159,9 @@ export default function Charging() {
                   </button>
                 ))}
               </div>
-              <p className="muted small">Fast mode only with compatible charging hardware.</p>
+              <p className="muted small">
+                Charging starts in Fast mode, then switches to Normal after 5 seconds when pump and fan cooling starts.
+              </p>
             </div>
           </div>
         </div>
@@ -161,7 +185,7 @@ export default function Charging() {
               <div className={`charge-pad-fill ${charging.active ? 'active' : ''}`} style={{ width: `${chargePct}%` }} />
             </div>
             <div className="charge-visual-readout">
-              <span>Live BMS power</span>
+              <span>{powerLabel}</span>
               <strong>{`${livePower.toFixed(1)} W`}</strong>
               <span>
                 {charging.active

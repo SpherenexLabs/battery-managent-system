@@ -55,13 +55,13 @@ health and alerts.**
 | Live telemetry | Vehicle voltage, station voltage, current, temperature, heating level, pump relay, fan relay and drive direction — streamed from Firebase with no polling |
 | Battery state | Live SOC is voltage-derived before a trip; reservation starts a 50–75% journey simulation that drains toward 25% while moving and rises only during relay-confirmed charging |
 | Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `BMS_5578/direction` |
-| Auto driving | One-click station reservation writes `Execute_Path = 1`, waits for `Ready`, then writes the mapped controller path to `Path_Name` |
+| Auto driving | Station reservation writes the selected station number to `Path_Name`; one optional global Initialize button writes `Execute_Path = 1` and waits for `Ready` |
 | Live path feedback | `Slot1`…`Slot4` provide vehicle-to-station distance and drive the journey progress/arrival animation |
-| Reserve & go | Station 1 → path 2, Station 2 → path 1, Station 3 → path 3, Station 4 → path 4 |
+| Reserve & go | Station 1 → path 1, Station 2 → path 2, Station 3 → path 3, Station 4 → path 4 |
 | 3D animation | The same scaled 120 × 160 cm route map on Overview, Drive Control and Charging, with a top-view car, current-step guidance, completed-path tracking and final-position reporting |
 | 360° camera | Orbit the scene a full turn with the mouse — drag to look around, scroll to zoom, right-drag to pan, one button to reset |
 | Alerts | 12 rule-based alerts covering low battery, overheating, voltage/current/SOC instability, slow charging, repeated overheat, frequent cooling, and BMS offline |
-| Thermal safety | After the `Execute_Path = Ready` handshake, Relay2 cycles 5 seconds ON / 5 seconds OFF regardless of direction or temperature. Heat % still controls temperature rise, and a 30 °C safety request overrides the cycle until cooling reaches 27 °C |
+| Thermal safety | Pump and fan remain OFF while the vehicle moves. Charging starts in Fast mode, then switches to Normal and turns both cooling relays ON after 5 seconds. Manual or 30 °C temperature cooling turns both ON immediately until cooling reaches 27 °C |
 | Stations | 4 live stations with switch-driven green/red state, current/voltage/power graphs, slot distance, reservation, and Three.js animation |
 | Wireless charging | A valid ultrasonic echo below 20 cm requests the reserved station relay; charging time/energy begin only after `RelayN = 1` feedback |
 | Health | Alert table with severity/status, event log with real timestamps, and operator acknowledgement |
@@ -145,10 +145,10 @@ and the drive controls write on click:
 | Controller | Trigger | Write |
 | --- | --- | --- |
 | Dashboard heating | `Heat` slider above 0% and fan OFF | Raises `Temp` from 0.1–0.6 °C/s according to Heat % |
-| Manual fan override | Operator presses Manual Fan ON/OFF | Keeps both fan relay paths ON until Manual OFF is pressed; automatic timers cannot cancel the override |
-| Path fan cycle | `Execute_Path` reports `Ready` and the path reservation is confirmed | `BMS_5578/Relay2` and `/BMS/Relay` cycle 5 seconds ON, 5 seconds OFF, independent of direction and temperature |
-| Automatic fan | Temperature ≥ 30 °C | Both fan relay paths become `1`; temperature cools by 0.5 °C/s and cannot rise while the fan is ON |
-| Fan hysteresis | Temperature ≤ 27 °C | Both fan relay paths return to `0` |
+| Manual cooling override | Operator presses Manual Fan ON/OFF | Turns the coolant pump and both fan relay paths ON together until Manual OFF is pressed |
+| Charging cooling delay | Relay-confirmed charging remains active for 5 seconds | Coolant pump `Relay1` and fan `Relay2` turn ON together and remain ON for the session |
+| Automatic cooling | Temperature ≥ 30 °C | Pump and both fan relay paths become `1`; temperature cools by 0.5 °C/s and cannot rise while cooling is ON |
+| Cooling hysteresis | Temperature ≤ 27 °C | Automatic pump and fan requests return to `0` |
 | Safety stop | Vehicle arrives, or the operator halts it | `direction = 'S'` |
 | Manual joystick | Operator presses a pad button | `direction = 'F' \| 'B' \| 'L' \| 'R' \| 'S'` |
 | Auto route playback | Each step's turn comes up | That step's `direction`, held for the step's duration, then `'S'` at the end |
@@ -503,15 +503,12 @@ forces a fresh high-accuracy fix. If location is blocked, distances and directio
 | Engagement | `Not engaged` → `Reservation pending` → `Vehicle en route` → `Docking engaged` → `Charging engaged` |
 | IoT link | `LIVE` / `OFFLINE` |
 
-**Buttons on each card:**
+**Controls:**
 
-- **Reserve** — selects the station (only available stations can be selected). Click
-  again on the selected card, now labelled **Reserve & Navigate**, or use the side
-  panel's confirm button.
-- **Directions** — opens Google Maps driving directions from the vehicle's live position
-  to that station in a new tab.
-- **Simulate Occupied / Free Slot** — writes `BMS_5578/Slot{N}` to fake a vehicle in
-  that bay. Use this to demo occupancy handling without physical hardware.
+- **Initialize Controller** — one optional global control that writes `Execute_Path = 1`
+  and waits for `Ready`. Reservation is not blocked when initialization is unnecessary.
+- **Reserve Station N** — writes that station number directly to `Path_Name` and begins
+  live route tracking.
 
 **Right-hand panel** (after selecting a station) shows the full reservation detail, an
 **Auto route to drive** picker, a three-step progress list, and the confirm button.
@@ -525,11 +522,11 @@ Control.
 
 **How to use it:**
 
-1. Confirm the location bar shows coordinates.
-2. Pick an **Available** station and click **Reserve**.
-3. Choose which saved route should drive the vehicle there.
-4. Click **Confirm & Play** — the station is locked, the app switches to Drive Control,
-   and the route starts playing straight away.
+1. Optionally press **Initialize Controller** when the hardware requires initialization.
+2. Pick an available station and click **Reserve Station N**.
+3. The controller receives `Path_Name = N` and live route tracking begins.
+4. Below 20 cm, the station relay is requested automatically and charging begins after
+   relay confirmation.
 
 ---
 
@@ -698,9 +695,9 @@ charging resumes automatically once the battery cools.
 **Cooling Control (Liquid Cooling).** Shows the warning and critical thresholds and a
 system summary of pump, fan, heater pad and temperature sensor.
 
-- **Automatic fan** — the dashboard Heat % control raises `Temp` at a proportional
-  rate. At 30 °C the app forces `Heat = 0` and switches fan `Relay2` to 1. While ON,
-  temperature falls by 0.5 °C/s and cannot increase; the fan releases at 27 °C.
+- **Automatic cooling** — the dashboard Heat % control raises `Temp` at a proportional
+  rate. At 30 °C the app forces `Heat = 0` and switches pump `Relay1` and fan `Relay2`
+  to 1. While ON, temperature falls by 0.5 °C/s and cannot increase; both release at 27 °C.
 - **Manual** — enables **Turn cooling ON / OFF** (both relays together) plus individual
   **Pump (Relay1)** and **Fan (Relay2)** toggles.
 
@@ -766,8 +763,8 @@ A complete demo run, start to finish:
 9. **Watch the session** — mode, SOC, session timer, live power and energy delivered.
    At 100% it stops and displays **Vehicle Full**.
 10. **Demonstrate thermal automation** — raise **Heat %** on Thermal Control. Temperature
-    rises according to the selected level. At **30 °C**, Heat turns OFF and the fan turns
-    ON automatically. Temperature cools by 0.5 °C/s, and the fan turns OFF at **27 °C**.
+    rises according to the selected level. At **30 °C**, Heat turns OFF and the pump and fan turn
+    ON automatically. Temperature cools by 0.5 °C/s, and cooling turns OFF at **27 °C**.
 11. **Review Health & Alerts** — the alert table shows every rule that fired and the
     event log gives the timestamped story of the whole run.
 

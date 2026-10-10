@@ -2,7 +2,7 @@ import { createContext, useContext } from 'react';
 import { distanceKm } from '../utils/geo.js';
 
 // Live battery temperature thresholds (°C). Temperature safety can hold the
-// fan ON independently of the movement fan cycle.
+// pump and fan ON together independently of the charging cooling delay.
 const WARN_TEMP = 30; // automatic fan / high-temperature threshold
 const CRITICAL_TEMP = 40; // critical-temperature alert
 const LOW_SOC_THRESHOLD = 15; // % — "find a nearby charging station" alert
@@ -34,9 +34,10 @@ const HEATER_ADDITIONAL_RISE_C_PER_SECOND = 0.5;
 const FAN_COOLING_C_PER_SECOND = 0.5;
 const FAN_OFF_TEMP_C = 27;
 const AMBIENT_TEMP_C = 25;
-const MOVEMENT_FAN_ON_SECONDS = 5;
-const MOVEMENT_FAN_OFF_SECONDS = 5;
-const MOVEMENT_FAN_CYCLE_SECONDS = MOVEMENT_FAN_ON_SECONDS + MOVEMENT_FAN_OFF_SECONDS;
+const CHARGING_ACTIVE_TEMP_C = 36;
+const CHARGING_HEAT_RISE_C_PER_SECOND = 0.4;
+const CHARGING_MAX_TEMP_C = 45;
+export const CHARGING_COOLING_DELAY_MS = 5000;
 
 export const THERMAL_LIMITS = {
   WARN_TEMP,
@@ -54,9 +55,47 @@ export const DIRECTION_LABEL = {
 };
 
 export function getChargingPower(state) {
-  const measuredPower =
-    state.voltage != null && state.current != null ? Math.abs(state.voltage * state.current) : 0;
-  return { watts: measuredPower, source: 'bms' };
+  const vehicleVoltage = Number(state.voltage);
+  const vehicleCurrent = Number(state.current);
+  const measuredPower = Math.abs(vehicleVoltage * vehicleCurrent);
+  if (vehicleVoltage > 0 && Math.abs(vehicleCurrent) > 0.01 && measuredPower > 0) {
+    return { watts: measuredPower, source: 'bms' };
+  }
+
+  const stationIndex = Number.isInteger(state.selectedStationId)
+    ? state.selectedStationId - 1
+    : -1;
+  const stationVoltage = Number(state.stationVoltages?.[stationIndex]);
+  const stationCurrent = Number(state.stationCurrents?.[stationIndex]);
+  const stationPower = Math.abs(stationVoltage * stationCurrent);
+  if (stationVoltage > 0 && Math.abs(stationCurrent) > 0.01 && stationPower > 0) {
+    return { watts: stationPower, source: 'station' };
+  }
+
+  if (!state.charging?.active) return { watts: 0, source: 'idle' };
+
+  // When the prototype publishes zero current, provide a transparent estimate
+  // instead of freezing power and delivered energy at zero. The estimate uses
+  // live voltage when available and tapers as SOC approaches 100%.
+  const estimatedVoltage = vehicleVoltage > 0
+    ? vehicleVoltage
+    : stationVoltage > 0
+      ? stationVoltage
+      : 12;
+  const baseCurrent = state.charging.mode === 'fast' ? 2.4 : 1.6;
+  const soc = Number.isFinite(state.soc) ? state.soc : 0;
+  const socTaper = soc > 80 ? Math.max(0.35, (100 - soc) / 20) : 1;
+  const temperatureFactor = Number(state.temperature) >= CRITICAL_TEMP ? 0.8 : 1;
+  const predictedPower = estimatedVoltage * baseCurrent * socTaper * temperatureFactor;
+  return { watts: predictedPower, source: 'predicted' };
+}
+
+export function isChargingCoolingActive(charging, now = Date.now()) {
+  return (
+    charging?.active === true &&
+    Number.isFinite(charging.sessionStartedAt) &&
+    now - charging.sessionStartedAt >= CHARGING_COOLING_DELAY_MS
+  );
 }
 
 export const SCREEN_IDS = ['overview', 'stations', 'navigation', 'charging', 'thermal', 'health'];
@@ -167,6 +206,11 @@ function isChargingArrivalDistance(value) {
   return typeof value === 'number' && value > 0 && value < CHARGING_ARRIVAL_DISTANCE_CM;
 }
 
+function chargingArrivalStationId(slots) {
+  const index = slots.findIndex(isChargingArrivalDistance);
+  return index >= 0 ? index + 1 : null;
+}
+
 function computeStations(state) {
   return STATIONS_BASE.map((base, i) => {
     const reportedLocation = state.stationLocations[i];
@@ -197,9 +241,10 @@ function computeStations(state) {
     let status = switchEngaged ? 'engaged' : availableSlots > 0 ? 'available' : 'occupied';
     if (base.id === state.selectedStationId) {
       if (state.vehicleStatus === 'charging') status = 'charging';
+      else if (state.charging.relayRequested) status = 'connecting';
       else if (state.reservationStatus !== 'none') status = 'reserved';
     }
-    if (indicatorEngaged && status !== 'charging') status = 'engaged';
+    if (indicatorEngaged && status !== 'charging' && status !== 'connecting') status = 'engaged';
     const distance = hasVehicleLocation
       ? distanceKm(state.vehicleLocation.lat, state.vehicleLocation.lng, location.lat, location.lng)
       : null;
@@ -444,6 +489,8 @@ export const initialState = {
   eventLog: [],
 
   connectivity: { online: false, lastSync: null },
+  bmsDataLoaded: false,
+  reservationRestoredFromFirebase: false,
 
   alertTimestamps: {}, // alert id -> ms epoch it first became active
 };
@@ -466,28 +513,32 @@ function reducerInner(state, action) {
       let heatPercent = state.heatPercent;
       let temperatureFanActive = state.temperatureFanActive === true;
       const manualFanOn = state.manualFanOn === true;
-      const chargingCoolingOn = state.charging.active === true;
-      const movementFanCycleActive = state.movementFanCycleActive === true;
-      let movementFanCycleSecond = state.movementFanCycleSecond ?? 0;
-      const movementFanOn = movementFanCycleActive && movementFanCycleSecond < MOVEMENT_FAN_ON_SECONDS;
-      movementFanCycleSecond = movementFanCycleActive
-        ? (movementFanCycleSecond + 1) % MOVEMENT_FAN_CYCLE_SECONDS
-        : 0;
+      const chargingCoolingOn = isChargingCoolingActive(state.charging, clock.getTime());
       let thermalSimulationActive =
-        state.thermalSimulationActive || heatPercent > 0 || temperatureFanActive || manualFanOn;
+        state.thermalSimulationActive ||
+        charging.active ||
+        heatPercent > 0 ||
+        temperatureFanActive ||
+        manualFanOn;
 
       if (state.batterySimulation.active && state.vehicleStatus === 'moving' && soc != null) {
         soc = round1(Math.max(DRIVING_SOC_FLOOR, soc - DRIVING_SOC_DROP_PER_SECOND));
       }
 
       if (thermalSimulationActive && temperature != null) {
-        if (temperatureFanActive || manualFanOn || chargingCoolingOn) {
+        if (charging.active) {
+          // Fast charging generates heat. Once the five-second cooling delay
+          // ends, the pump and fan reduce the displayed temperature each tick.
+          temperature = chargingCoolingOn || temperatureFanActive || manualFanOn
+            ? round1(Math.max(AMBIENT_TEMP_C, temperature - FAN_COOLING_C_PER_SECOND))
+            : round1(Math.min(CHARGING_MAX_TEMP_C, temperature + CHARGING_HEAT_RISE_C_PER_SECOND));
+        } else if (temperatureFanActive || manualFanOn || chargingCoolingOn) {
           temperature = round1(Math.max(AMBIENT_TEMP_C, temperature - FAN_COOLING_C_PER_SECOND));
           if (temperatureFanActive && temperature <= FAN_OFF_TEMP_C) {
             temperatureFanActive = false;
             eventLog = pushLog(eventLog, `Automatic fan turned OFF at ${temperature.toFixed(1)}°C.`);
           }
-        } else if (heatPercent > 0 && !movementFanOn) {
+        } else if (heatPercent > 0) {
           const heaterRise =
             HEATER_BASE_RISE_C_PER_SECOND +
             (heatPercent / 100) * HEATER_ADDITIONAL_RISE_C_PER_SECOND;
@@ -504,12 +555,20 @@ function reducerInner(state, action) {
         }
       }
 
-      // While driving, Relay2 cycles independently of temperature. A thermal
-      // safety request has priority and keeps the fan continuously ON.
-      const fanRelay = manualFanOn || temperatureFanActive || movementFanOn || chargingCoolingOn ? 1 : 0;
+      // Driving never enables cooling. Charging enables both cooling relays
+      // after five seconds; manual or temperature safety cooling is immediate.
+      let fanRelay = manualFanOn || temperatureFanActive || chargingCoolingOn ? 1 : 0;
+
+      if (chargingCoolingOn && charging.mode === 'fast') {
+        charging = { ...charging, mode: 'normal' };
+        eventLog = pushLog(
+          eventLog,
+          'Fast-charge startup complete — switched to Normal mode and enabled pump + fan cooling.'
+        );
+      }
 
       if (charging.active && selectedRelayOn) {
-        const power = getChargingPower(state);
+        const power = getChargingPower({ ...state, charging, soc, temperature });
         const previousEnergyWh = Number.isFinite(charging.energyWh) ? charging.energyWh : 0;
         charging = { ...charging, energyWh: previousEnergyWh + power.watts / 3600 };
         if (state.batterySimulation.active && soc != null) {
@@ -526,6 +585,7 @@ function reducerInner(state, action) {
           sessionStartedAt: null,
           sessionStartSoc: null,
         };
+        fanRelay = manualFanOn || temperatureFanActive ? 1 : 0;
         eventLog = pushLog(eventLog, 'Battery fully charged (100% SOC) — charging session complete.');
       }
 
@@ -538,8 +598,8 @@ function reducerInner(state, action) {
         heatPercent,
         thermalSimulationActive,
         temperatureFanActive,
-        movementFanCycleActive,
-        movementFanCycleSecond,
+        movementFanCycleActive: false,
+        movementFanCycleSecond: 0,
         charging,
         eventLog,
       });
@@ -551,23 +611,23 @@ function reducerInner(state, action) {
       const voltage = typeof d.Voltage1 === 'number' ? round1(d.Voltage1) : state.voltage;
       const current = typeof d.Current === 'number' ? round1(d.Current) : state.current;
       const measuredTemperature = typeof d.Temp === 'number' ? round1(d.Temp) : state.temperature;
-      const measuredHeatPercent =
-        typeof d.Heat === 'number' ? clamp(Math.round(d.Heat), 0, 100) : state.heatPercent;
-      const measuredFanRelay = typeof d.Relay2 === 'number' ? (d.Relay2 > 0 ? 1 : 0) : state.fanRelay;
-      const movementFanControlled = state.movementFanCycleActive === true;
       const manualFanOn = state.manualFanOn === true;
-      const chargingCoolingOn = state.charging.active === true;
-      const locallyControlledFan =
-        state.thermalSimulationActive || movementFanControlled || manualFanOn || chargingCoolingOn;
-      const temperatureFanActive =
-        state.temperatureFanActive === true || (!locallyControlledFan && measuredFanRelay === 1);
+      const chargingControlsCooling = state.charging.active === true;
+      // A persisted Firebase temperature must not re-arm cooling after refresh.
+      // Temperature cooling is armed only by this session's Heat control.
+      const temperatureFanActive = state.temperatureFanActive === true;
       const thermalSimulationActive =
-        state.thermalSimulationActive || measuredHeatPercent > 0 || temperatureFanActive || manualFanOn;
+        state.thermalSimulationActive || temperatureFanActive || manualFanOn;
       const temperature =
-        thermalSimulationActive && state.temperature != null ? state.temperature : measuredTemperature;
-      const pumpRelay = typeof d.Relay1 === 'number' ? (d.Relay1 > 0 ? 1 : 0) : state.pumpRelay;
-      const fanRelay = locallyControlledFan ? state.fanRelay : measuredFanRelay;
-      const heatPercent = state.thermalSimulationActive && state.fanRelay === 1 ? state.heatPercent : measuredHeatPercent;
+        state.thermalSimulationActive && state.temperature != null ? state.temperature : measuredTemperature;
+      const automaticPumpRequested =
+        temperatureFanActive || manualFanOn || isChargingCoolingActive(state.charging, now);
+      const measuredPumpRelay =
+        typeof d.Relay1 === 'number' ? (d.Relay1 > 0 ? 1 : 0) : state.pumpRelay;
+      const pumpRelay = automaticPumpRequested ? measuredPumpRelay : 0;
+      const fanRelay =
+        temperatureFanActive || manualFanOn ? 1 : chargingControlsCooling ? state.fanRelay : 0;
+      const heatPercent = state.thermalSimulationActive ? state.heatPercent : 0;
       const direction = typeof d.direction === 'string' && DIRECTION_LABEL[d.direction] ? d.direction : state.direction;
       const socSignal = typeof d.SOC === 'number' ? (d.SOC > 0 ? 1 : 0) : state.socSignal;
       const sodSignal = typeof d.SOD === 'number' ? (d.SOD > 0 ? 1 : 0) : state.sodSignal;
@@ -580,6 +640,20 @@ function reducerInner(state, action) {
             ? null
             : state.executePathStatus;
       const pathName = typeof d.Path_Name === 'number' ? Math.round(d.Path_Name) : state.pathName;
+      // Restore the selected reservation after a browser refresh from the
+      // controller's live Path_Name. Path values map directly to stations 1–4.
+      const pathStationId = pathName >= 1 && pathName <= 4 ? pathName : null;
+      const reservationRestoredFromFirebase =
+        state.reservationRestoredFromFirebase ||
+        (!state.bmsDataLoaded &&
+          state.reservationStatus === 'none' &&
+          state.selectedStationId == null &&
+          pathStationId != null);
+      let selectedStationId = state.selectedStationId ?? pathStationId;
+      let reservationStatus =
+        state.reservationStatus === 'none' && selectedStationId != null
+          ? 'confirmed'
+          : state.reservationStatus;
       const slots = [0, 1, 2, 3].map((i) => {
         // /BMS is the station controller's authoritative ultrasonic feed.
         // Once it has loaded, do not let stale SlotN fields in /BMS_5578
@@ -588,6 +662,15 @@ function reducerInner(state, action) {
         const v = d[`Slot${i + 1}`];
         return typeof v === 'number' ? v : state.slots[i];
       });
+      // Physical ultrasonic arrival is authoritative. If it disagrees with a
+      // stale reservation/Path_Name, charge the station where the vehicle is.
+      const ultrasonicStationId = chargingArrivalStationId(slots);
+      const stationChangedByUltrasonic =
+        ultrasonicStationId != null && ultrasonicStationId !== selectedStationId;
+      if (ultrasonicStationId != null) {
+        selectedStationId = ultrasonicStationId;
+        reservationStatus = 'confirmed';
+      }
       const stationOccupancy = [0, 1, 2, 3].map((i) => {
         const value = d[`Station${i + 1}Filled`];
         return typeof value === 'number' && value >= 0 ? Math.round(value) : state.stationOccupancy[i];
@@ -622,7 +705,7 @@ function reducerInner(state, action) {
       // SlotN is the controller's live vehicle-to-station distance in cm.
       // Only the selected station's valid ultrasonic echo below 20 cm confirms
       // arrival and requests its charging relay. Zero is invalid/no echo.
-      const selectedSlot = state.selectedStationId ? slots[state.selectedStationId - 1] : null;
+      const selectedSlot = selectedStationId ? slots[selectedStationId - 1] : null;
       const hasSelectedDistance = typeof selectedSlot === 'number' && selectedSlot > 0;
       const selectedChargingDistanceReached = isChargingArrivalDistance(selectedSlot);
       const distanceProgress = hasSelectedDistance
@@ -634,6 +717,14 @@ function reducerInner(state, action) {
       // Execute_Path returning to zero only ends the command pulse; it does not
       // prove physical arrival. The reserved ultrasonic sensor is authoritative.
       let vehicleStatus = arrivedFromDistance ? 'arrived' : state.vehicleStatus;
+      if (
+        vehicleStatus === 'idle' &&
+        reservationStatus === 'confirmed' &&
+        selectedStationId != null &&
+        !arrivalDetected
+      ) {
+        vehicleStatus = 'moving';
+      }
       let navProgress = vehicleStatus === 'arrived' ? 100 : distanceProgress;
       let routeSteps =
         vehicleStatus === 'arrived'
@@ -675,12 +766,45 @@ function reducerInner(state, action) {
         eventLog = pushLog(eventLog, `Cooling fan (Relay2) turned ${fanRelay ? 'ON' : 'OFF'}.`);
       }
 
-      let charging = state.charging;
+      let charging = stationChangedByUltrasonic
+        ? {
+            ...state.charging,
+            active: false,
+            mode: 'paused',
+            arrivalConfirmed: false,
+            coilAligned: false,
+            relayRequested: false,
+            sessionStartedAt: null,
+            sessionStartSoc: null,
+            energyWh: 0,
+          }
+        : state.charging;
+      const chargingArrivalLost =
+        (charging.relayRequested || charging.active || charging.coilAligned) &&
+        !arrivalDetected;
+      if (chargingArrivalLost) {
+        charging = {
+          ...charging,
+          active: false,
+          mode: 'paused',
+          arrivalConfirmed: false,
+          coilAligned: false,
+          relayRequested: false,
+          sessionStartedAt: null,
+          sessionStartSoc: null,
+        };
+        vehicleStatus = reservationStatus === 'confirmed' ? 'moving' : 'idle';
+        routeSteps = { ...routeSteps, followingTrack: true, arrived: false };
+        eventLog = pushLog(
+          eventLog,
+          `Station ${selectedStationId} ultrasonic distance left the charging range — charging relay OFF.`
+        );
+      }
       const selectedRelayOn =
-        state.selectedStationId != null && state.stationRelays[state.selectedStationId - 1] === 1;
+        selectedStationId != null && state.stationRelays[selectedStationId - 1] === 1;
       const shouldAutoStartCharging =
-        state.reservationStatus === 'confirmed' &&
-        state.selectedStationId != null &&
+        reservationStatus === 'confirmed' &&
+        selectedStationId != null &&
         arrivalDetected &&
         !charging.coilAligned &&
         charging.mode !== 'complete';
@@ -696,7 +820,7 @@ function reducerInner(state, action) {
           coilAligned: true,
           relayRequested: true,
           active: selectedRelayOn,
-          mode: selectedRelayOn ? 'normal' : 'paused',
+          mode: selectedRelayOn ? 'fast' : 'paused',
           sessionStartedAt: selectedRelayOn ? now : null,
           sessionStartSoc: selectedRelayOn ? soc : null,
           energyWh: 0,
@@ -704,8 +828,8 @@ function reducerInner(state, action) {
         eventLog = pushLog(
           eventLog,
           selectedRelayOn
-            ? `Vehicle reached Station ${state.selectedStationId} (${selectedSlot} cm) — relay is ON and wireless charging started.`
-            : `Vehicle reached Station ${state.selectedStationId} (${selectedSlot} cm) — relay ON was requested.`
+            ? `Vehicle reached Station ${selectedStationId} (${selectedSlot} cm) — relay is ON and wireless charging started.`
+            : `Vehicle reached Station ${selectedStationId} (${selectedSlot} cm) — relay ON was requested.`
         );
       }
 
@@ -728,6 +852,11 @@ function reducerInner(state, action) {
       );
       let overheatEvents = trimByWindow(state.history.overheatEvents, now);
       if (isWarn && !wasWarn) overheatEvents = [...overheatEvents, now];
+      const stationRelays = chargingArrivalLost && selectedStationId != null
+        ? state.stationRelays.map((relay, index) =>
+            index === selectedStationId - 1 ? 0 : relay
+          )
+        : state.stationRelays;
 
       return withAlertTimestamps({
         ...state,
@@ -741,8 +870,8 @@ function reducerInner(state, action) {
         heatPercent,
         thermalSimulationActive,
         temperatureFanActive,
-        movementFanCycleActive: stopMovementFan ? false : state.movementFanCycleActive,
-        movementFanCycleSecond: stopMovementFan ? 0 : state.movementFanCycleSecond,
+        movementFanCycleActive: false,
+        movementFanCycleSecond: 0,
         direction,
         socSignal,
         sodSignal,
@@ -750,6 +879,8 @@ function reducerInner(state, action) {
         executePath,
         executePathStatus,
         pathName,
+        selectedStationId,
+        reservationStatus,
         slots,
         stationOccupancy,
         stationCapacity,
@@ -757,6 +888,7 @@ function reducerInner(state, action) {
         stationNames,
         stationCurrents,
         stationVoltages,
+        stationRelays,
         soc,
         soh,
         vehicleStatus,
@@ -766,6 +898,8 @@ function reducerInner(state, action) {
         eventLog,
         history: { samples, overheatEvents },
         connectivity: { online: true, lastSync: now },
+        bmsDataLoaded: true,
+        reservationRestoredFromFirebase,
       });
     }
 
@@ -802,7 +936,7 @@ function reducerInner(state, action) {
         );
         return value == null ? null : value > 0 ? 1 : 0;
       });
-      const stationRelays = [1, 2, 3, 4].map((stationId, index) => {
+      let stationRelays = [1, 2, 3, 4].map((stationId, index) => {
         const value = firstNumber(
           d,
           [`Relay${stationId}`, `relay${stationId}`, `Station${stationId}Relay`],
@@ -815,6 +949,9 @@ function reducerInner(state, action) {
       );
       const stationTemperature = firstNumber(d, ['Temp', 'Temperature'], state.temperature);
       const measuredTemperature = stationTemperature == null ? null : round1(stationTemperature);
+      const temperatureFanActive = state.temperatureFanActive === true;
+      const thermalSimulationActive =
+        state.thermalSimulationActive || temperatureFanActive || state.manualFanOn;
       const temperature =
         state.thermalSimulationActive && state.temperature != null ? state.temperature : measuredTemperature;
       const stationHistory = [0, 1, 2, 3].map((index) => {
@@ -827,19 +964,62 @@ function reducerInner(state, action) {
         return [...previous, { t: now, current, voltage }].slice(-STATION_HISTORY_MAX_SAMPLES);
       });
 
+      const ultrasonicStationId = chargingArrivalStationId(slots);
+      const selectedStationId = ultrasonicStationId ?? state.selectedStationId;
+      const reservationStatus =
+        ultrasonicStationId != null ? 'confirmed' : state.reservationStatus;
+      const stationChangedByUltrasonic =
+        ultrasonicStationId != null && ultrasonicStationId !== state.selectedStationId;
       const selectedRelayValue =
-        state.selectedStationId != null ? stationRelays[state.selectedStationId - 1] : null;
-      const selectedSlot = state.selectedStationId != null ? slots[state.selectedStationId - 1] : null;
+        selectedStationId != null ? stationRelays[selectedStationId - 1] : null;
+      const selectedSlot = selectedStationId != null ? slots[selectedStationId - 1] : null;
       const selectedChargingDistanceReached = isChargingArrivalDistance(selectedSlot);
-      let charging = state.charging;
+      let charging = stationChangedByUltrasonic
+        ? {
+            ...state.charging,
+            active: false,
+            mode: 'paused',
+            arrivalConfirmed: false,
+            coilAligned: false,
+            relayRequested: false,
+            sessionStartedAt: null,
+            sessionStartSoc: null,
+            energyWh: 0,
+          }
+        : state.charging;
       let vehicleStatus = state.vehicleStatus;
       let screen = state.screen;
       let eventLog = state.eventLog;
       let routeSteps = state.routeSteps;
       let navProgress = state.navProgress;
+      const chargingArrivalLost =
+        (charging.relayRequested || charging.active || charging.coilAligned) &&
+        !selectedChargingDistanceReached;
+      if (chargingArrivalLost) {
+        stationRelays = stationRelays.map((relay, index) =>
+          index === selectedStationId - 1 ? 0 : relay
+        );
+        charging = {
+          ...charging,
+          active: false,
+          mode: 'paused',
+          arrivalConfirmed: false,
+          coilAligned: false,
+          relayRequested: false,
+          sessionStartedAt: null,
+          sessionStartSoc: null,
+        };
+        vehicleStatus = reservationStatus === 'confirmed' ? 'moving' : 'idle';
+        routeSteps = { ...routeSteps, followingTrack: true, arrived: false };
+        navProgress = 0;
+        eventLog = pushLog(
+          eventLog,
+          `Station ${selectedStationId} ultrasonic distance left the charging range — charging relay OFF.`
+        );
+      }
       const shouldRequestRelay =
-        state.reservationStatus === 'confirmed' &&
-        state.selectedStationId != null &&
+        reservationStatus === 'confirmed' &&
+        selectedStationId != null &&
         selectedChargingDistanceReached &&
         !charging.relayRequested &&
         !charging.active &&
@@ -854,7 +1034,7 @@ function reducerInner(state, action) {
           coilAligned: true,
           relayRequested: true,
           active: relayAlreadyOn,
-          mode: relayAlreadyOn ? 'normal' : 'paused',
+          mode: relayAlreadyOn ? 'fast' : 'paused',
           sessionStartedAt: relayAlreadyOn ? now : null,
           sessionStartSoc: relayAlreadyOn ? state.soc : null,
           energyWh: 0,
@@ -866,8 +1046,8 @@ function reducerInner(state, action) {
         eventLog = pushLog(
           eventLog,
           relayAlreadyOn
-            ? `Station ${state.selectedStationId} detected the robot at ${selectedSlot} cm — relay is ON and charging started.`
-            : `Station ${state.selectedStationId} detected the robot at ${selectedSlot} cm — vehicle stopped and relay ON was requested.`
+            ? `Station ${selectedStationId} detected the robot at ${selectedSlot} cm — relay is ON and charging started.`
+            : `Station ${selectedStationId} detected the robot at ${selectedSlot} cm — vehicle stopped and relay ON was requested.`
         );
       }
 
@@ -876,13 +1056,14 @@ function reducerInner(state, action) {
         !charging.active &&
         charging.mode !== 'complete' &&
         selectedRelayValue === 1;
-      const relayDropped = charging.active && selectedRelayValue === 0;
+      const relayDropped =
+        !chargingArrivalLost && charging.active && selectedRelayValue === 0;
 
       if (relayConfirmed) {
         charging = {
           ...charging,
           active: true,
-          mode: 'normal',
+          mode: 'fast',
           sessionStartedAt: now,
           sessionStartSoc: state.soc,
         };
@@ -890,7 +1071,7 @@ function reducerInner(state, action) {
         screen = 'charging';
         eventLog = pushLog(
           eventLog,
-          `Station ${state.selectedStationId} relay confirmed ON — charging calculation started.`
+          `Station ${selectedStationId} relay confirmed ON — charging calculation started.`
         );
       } else if (relayDropped) {
         charging = {
@@ -907,7 +1088,7 @@ function reducerInner(state, action) {
         vehicleStatus = 'arrived';
         eventLog = pushLog(
           eventLog,
-          `Station ${state.selectedStationId} relay feedback dropped — charging paused and relay ON is being retried.`
+          `Station ${selectedStationId} relay feedback dropped — charging paused and relay ON is being retried.`
         );
       }
 
@@ -921,10 +1102,14 @@ function reducerInner(state, action) {
         slots,
         stationHistory,
         stationDataLoaded: true,
+        selectedStationId,
+        reservationStatus,
         temperature,
-        fanRelay: shouldRequestRelay && !state.temperatureFanActive ? 0 : state.fanRelay,
-        movementFanCycleActive: shouldRequestRelay ? false : state.movementFanCycleActive,
-        movementFanCycleSecond: shouldRequestRelay ? 0 : state.movementFanCycleSecond,
+        temperatureFanActive,
+        thermalSimulationActive,
+        fanRelay: temperatureFanActive ? 1 : shouldRequestRelay ? 0 : state.fanRelay,
+        movementFanCycleActive: false,
+        movementFanCycleSecond: 0,
         charging,
         vehicleStatus,
         screen,
@@ -1091,7 +1276,7 @@ function reducerInner(state, action) {
       return {
         ...state,
         vehicleStatus: state.vehicleStatus === 'moving' ? 'idle' : state.vehicleStatus,
-        fanRelay: state.temperatureFanActive ? 1 : 0,
+        fanRelay: state.temperatureFanActive || state.manualFanOn ? 1 : 0,
         movementFanCycleActive: false,
         movementFanCycleSecond: 0,
         executePath: 0,
@@ -1124,13 +1309,17 @@ function reducerInner(state, action) {
         batterySimulation: { active: true },
         selectedStationId: action.id,
         reservationStatus: 'confirmed',
+        reservationRestoredFromFirebase: false,
         executePath: 1,
         pathName: action.pathName,
         routeSteps: { reservationConfirmed: true, followingTrack: true, arrived: false },
         vehicleStatus: 'moving',
-        fanRelay: 1,
-        movementFanCycleActive: true,
-        movementFanCycleSecond: 1,
+        pumpRelay: 0,
+        fanRelay: 0,
+        manualFanOn: false,
+        temperatureFanActive: false,
+        movementFanCycleActive: false,
+        movementFanCycleSecond: 0,
         driveMode: 'auto',
         navProgress: 0,
         navStopped: false,
@@ -1142,6 +1331,53 @@ function reducerInner(state, action) {
         ),
       };
     }
+
+    case 'RETRY_STATION_PATH':
+      if (
+        state.reservationStatus !== 'confirmed' ||
+        state.selectedStationId !== action.id
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        pathName: action.pathName ?? action.id,
+        reservationRestoredFromFirebase: false,
+        vehicleStatus: 'moving',
+        navProgress: 0,
+        navStopped: false,
+        routeSteps: { reservationConfirmed: true, followingTrack: true, arrived: false },
+        eventLog: pushLog(
+          state.eventLog,
+          `Controller path ${action.pathName ?? action.id} was sent again for Station ${action.id}.`
+        ),
+      };
+
+    case 'CANCEL_STATION_RESERVATION':
+      return {
+        ...state,
+        ...withCommand(state, 'S'),
+        selectedStationId: null,
+        reservationStatus: 'none',
+        reservationRestoredFromFirebase: false,
+        pathName: 0,
+        vehicleStatus: 'idle',
+        navProgress: 0,
+        navStopped: true,
+        routeSteps: { reservationConfirmed: false, followingTrack: false, arrived: false },
+        stationRelays: [0, 0, 0, 0],
+        charging: {
+          ...state.charging,
+          active: false,
+          mode: 'paused',
+          arrivalConfirmed: false,
+          coilAligned: false,
+          relayRequested: false,
+          sessionStartedAt: null,
+          sessionStartSoc: null,
+        },
+        eventLog: pushLog(state.eventLog, 'Station reservation cancelled and controller path cleared.'),
+      };
 
     case 'CONFIRM_RESERVATION': {
       const station = computeStations(state).find((s) => s.id === state.selectedStationId);
@@ -1160,6 +1396,12 @@ function reducerInner(state, action) {
         reservationStatus: 'confirmed',
         routeSteps: { reservationConfirmed: true, followingTrack: true, arrived: false },
         vehicleStatus: 'moving',
+        pumpRelay: 0,
+        fanRelay: 0,
+        manualFanOn: false,
+        temperatureFanActive: false,
+        movementFanCycleActive: false,
+        movementFanCycleSecond: 0,
         driveMode: 'auto',
         navProgress: 0,
         navStopped: false,
@@ -1197,7 +1439,7 @@ function reducerInner(state, action) {
           coilAligned: true,
           relayRequested: true,
           active: relayOn,
-          mode: relayOn ? 'normal' : 'paused',
+          mode: relayOn ? 'fast' : 'paused',
           sessionStartedAt: relayOn ? Date.now() : null,
           sessionStartSoc: relayOn ? state.soc : null,
           energyWh: 0,
@@ -1213,13 +1455,9 @@ function reducerInner(state, action) {
 
     case 'SET_MANUAL_FAN': {
       const manualFanOn = action.on === true;
-      const cycleSecond = state.movementFanCycleSecond ?? 0;
-      const lastCycleSecond =
-        (cycleSecond + MOVEMENT_FAN_CYCLE_SECONDS - 1) % MOVEMENT_FAN_CYCLE_SECONDS;
-      const movementFanOn =
-        state.movementFanCycleActive === true && lastCycleSecond < MOVEMENT_FAN_ON_SECONDS;
       const temperatureFanActive = state.temperatureFanActive === true;
-      const fanRelay = manualFanOn || temperatureFanActive || movementFanOn ? 1 : 0;
+      const chargingCoolingOn = isChargingCoolingActive(state.charging, state.clock.getTime());
+      const fanRelay = manualFanOn || temperatureFanActive || chargingCoolingOn ? 1 : 0;
       return {
         ...state,
         manualFanOn,
@@ -1227,6 +1465,17 @@ function reducerInner(state, action) {
         thermalSimulationActive:
           manualFanOn || temperatureFanActive || state.heatPercent > 0,
         eventLog: pushLog(state.eventLog, `Manual cooling fan turned ${manualFanOn ? 'ON' : 'OFF'}.`),
+      };
+    }
+
+    case 'SET_HEAT_LEVEL': {
+      const heatPercent = clamp(Math.round(Number(action.percent) || 0), 0, 100);
+      return {
+        ...state,
+        temperature: state.temperature ?? AMBIENT_TEMP_C,
+        heatPercent,
+        thermalSimulationActive:
+          heatPercent > 0 || state.temperatureFanActive || state.manualFanOn,
       };
     }
 
@@ -1276,7 +1525,7 @@ function reducerInner(state, action) {
           ...state.charging,
           relayRequested: !stopping,
           active,
-          mode: active ? 'normal' : 'paused',
+          mode: active ? 'fast' : 'paused',
           sessionStartedAt: active ? (state.charging.sessionStartedAt ?? Date.now()) : null,
           sessionStartSoc: active ? (state.charging.sessionStartSoc ?? state.soc) : null,
         },
@@ -1299,8 +1548,41 @@ function reducerInner(state, action) {
 }
 
 export function reducer(state, action) {
-  const next = reducerInner(state, action);
+  let next = reducerInner(state, action);
   if (next === state) return state;
+
+  // A reservation restored after a browser refresh does not pass through the
+  // normal RESERVE_STATION action, so its battery simulation flag starts OFF.
+  // As soon as the station relay confirms charging, enable SOC and temperature
+  // progression for every entry path. Seed 36 C only once; later cooling ticks
+  // must be allowed to reduce it.
+  const chargingJustStarted = next.charging.active && !state.charging.active;
+  if (
+    next.charging.active &&
+    (!next.batterySimulation.active ||
+      !next.thermalSimulationActive ||
+      !Number.isFinite(next.temperature) ||
+      chargingJustStarted)
+  ) {
+    const chargingSoc = Number.isFinite(next.soc) ? clamp(next.soc, 0, 100) : 0;
+    const chargingTemperature = chargingJustStarted && Number.isFinite(next.temperature)
+      ? Math.max(next.temperature, CHARGING_ACTIVE_TEMP_C)
+      : Number.isFinite(next.temperature)
+        ? next.temperature
+        : CHARGING_ACTIVE_TEMP_C;
+    next = {
+      ...next,
+      soc: chargingSoc,
+      temperature: chargingTemperature,
+      batterySimulation: { active: true },
+      thermalSimulationActive: true,
+      charging: {
+        ...next.charging,
+        sessionStartSoc: next.charging.sessionStartSoc ?? chargingSoc,
+      },
+    };
+  }
+
   return { ...next, stations: computeStations(next) };
 }
 

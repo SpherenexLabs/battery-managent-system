@@ -14,6 +14,13 @@ export default function Thermal() {
   const tempHigh = temperature != null && temperature >= THERMAL_LIMITS.WARN_TEMP;
   const critical = temperature != null && temperature >= THERMAL_LIMITS.CRITICAL_TEMP;
 
+  function requestHeat(percent) {
+    dispatch({ type: 'SET_HEAT_LEVEL', percent });
+    setHeat(percent).catch((error) => {
+      console.error('Could not update the heater level:', error);
+    });
+  }
+
   return (
     <div className="screen">
       <div className="thermal-topbar">
@@ -33,7 +40,7 @@ export default function Thermal() {
 
       <PageHeader
         title="Artificial Battery Heating & Thermal Control"
-        subtitle="Use Heat % to raise temperature. After Execute_Path reports Ready, the fan cycles 5 seconds ON and 5 seconds OFF regardless of direction or temperature."
+        subtitle="Driving keeps cooling OFF. Manual cooling or high temperature starts both pump and fan; charging starts them after 5 seconds."
         showBadge={false}
       />
 
@@ -135,21 +142,21 @@ export default function Thermal() {
 
             <label className="pwm-slider-label">
               Requested heating level (%)
-              <input type="range" min="0" max="100" value={heatPercent} onChange={(e) => setHeat(Number(e.target.value))} />
+              <input type="range" min="0" max="100" value={heatPercent} onChange={(e) => requestHeat(Number(e.target.value))} />
             </label>
 
             <div className="thermal-test-actions">
-              <button type="button" className="btn btn-accent" disabled={heatPercent > 0} onClick={() => setHeat(40)}>
+              <button type="button" className="btn btn-accent" disabled={heatPercent > 0} onClick={() => requestHeat(40)}>
                 Turn heater ON
               </button>
-              <button type="button" className="btn btn-outline" disabled={heatPercent === 0} onClick={() => setHeat(0)}>
+              <button type="button" className="btn btn-outline" disabled={heatPercent === 0} onClick={() => requestHeat(0)}>
                 Turn heater OFF
               </button>
             </div>
 
             <p className="muted small">
-              Heat % controls the temperature-rise rate. At 30 °C the heater turns OFF and the fan turns ON;
-              temperature then falls by 0.5 °C per second. The fan turns OFF at 27 °C.
+              Heat % controls the temperature-rise rate. At 30 °C the heater turns OFF and both the pump and fan turn ON;
+              temperature then falls by 0.5 °C per second. Cooling turns OFF at 27 °C.
             </p>
           </div>
         </div>

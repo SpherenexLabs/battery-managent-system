@@ -32,6 +32,76 @@ const COLORS = {
   idle: 0x64748b,
 };
 
+const FALLBACK_STATION_SPOTS = {
+  1: { left: 24, top: 68 },
+  2: { left: 76, top: 68 },
+  3: { left: 76, top: 24 },
+  4: { left: 24, top: 24 },
+};
+
+function VehicleFallback2D({ state, mode, height }) {
+  const start = { left: 50, top: 88 };
+  const target = FALLBACK_STATION_SPOTS[state.selectedStationId] || start;
+  const docked = state.vehicleStatus === 'arrived' || state.vehicleStatus === 'charging';
+  const progress = docked || mode === 'charge' ? 1 : Math.min(1, Math.max(0, state.navProgress / 100));
+  const carPosition = {
+    left: start.left + (target.left - start.left) * progress,
+    top: start.top + (target.top - start.top) * progress,
+  };
+  const charging = state.charging.active === true;
+
+  return (
+    <div className="scene2d-wrap" style={{ height }} aria-label="Live 2D vehicle and charging station animation">
+      <div className="scene2d-board">
+        <svg className="scene2d-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          {state.selectedStationId && (
+            <>
+              <line x1={start.left} y1={start.top} x2={target.left} y2={target.top} className="scene2d-route-guide" />
+              <line x1={start.left} y1={start.top} x2={carPosition.left} y2={carPosition.top} className="scene2d-route-live-line" />
+            </>
+          )}
+        </svg>
+
+        {state.stations.map((station) => {
+          const spot = FALLBACK_STATION_SPOTS[station.id];
+          const selected = station.id === state.selectedStationId;
+          const relayOn = station.relayValue === 1;
+          return (
+            <div
+              key={station.id}
+              className={`scene2d-station ${selected ? 'selected' : ''} ${relayOn ? 'relay-on' : ''}`}
+              style={{ left: `${spot.left}%`, top: `${spot.top}%` }}
+            >
+              <span className="scene2d-pad">⚡</span>
+              <strong>S{station.id}</strong>
+              <small>{relayOn ? 'CHARGING' : station.indicatorEngaged ? 'ENGAGED' : 'READY'}</small>
+              {charging && selected && <i className="scene2d-energy-ring ring-one" />}
+              {charging && selected && <i className="scene2d-energy-ring ring-two" />}
+            </div>
+          );
+        })}
+
+        <div
+          className={`scene2d-car ${state.vehicleStatus === 'moving' ? 'moving' : ''} ${charging ? 'charging' : ''}`}
+          style={{ left: `${carPosition.left}%`, top: `${carPosition.top}%` }}
+        >
+          <span>🚙</span>
+        </div>
+
+        <div className="scene2d-live-status">
+          <strong>{charging ? 'Wireless charging active' : state.vehicleStatus === 'moving' ? 'Vehicle moving' : 'Live station map'}</strong>
+          <span>
+            {state.selectedStationId
+              ? `Station ${state.selectedStationId} · ${Math.round(progress * 100)}% route progress`
+              : 'Select and reserve a station'}
+          </span>
+        </div>
+        <div className="scene2d-webgl-note">Live compatibility animation</div>
+      </div>
+    </div>
+  );
+}
+
 function makeVehicle() {
   const car = new THREE.Group();
 
@@ -257,7 +327,12 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
   const [supported] = useState(() => {
     try {
       const probe = document.createElement('canvas');
-      return !!(probe.getContext('webgl2') || probe.getContext('webgl'));
+      const options = { antialias: true, failIfMajorPerformanceCaveat: false };
+      return !!(
+        probe.getContext('webgl2', options) ||
+        probe.getContext('webgl', options) ||
+        probe.getContext('experimental-webgl', options)
+      );
     } catch {
       return false;
     }
@@ -637,11 +712,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
   }, [mode, height, supported]);
 
   if (!supported) {
-    return (
-      <div className="scene3d-fallback" style={{ height }}>
-        3D view unavailable — this browser or device has no WebGL support.
-      </div>
-    );
+    return <VehicleFallback2D state={state} mode={mode} height={height} />;
   }
 
   return (

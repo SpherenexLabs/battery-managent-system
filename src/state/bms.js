@@ -95,8 +95,21 @@ export async function initializeStationPath() {
 export async function reserveStationPath(stationId) {
   const pathName = STATION_PATH_NAME[stationId];
   if (pathName == null) throw new Error(`Unknown station ${stationId}.`);
+  // Always create a fresh command edge. Writing the same Path_Name twice does
+  // not generate a Firebase value change, so the controller would otherwise
+  // leave the dashboard stuck at "Reserved" without starting the route again.
+  await set(ref(database, `${BMS_PATH}/Path_Name`), 0);
   await set(ref(database, `${BMS_PATH}/Path_Name`), pathName);
   return pathName;
+}
+
+// Release a reservation without clearing Execute_Path/Ready. Initialization is
+// global and only needs to be completed once for all four stations.
+export function releaseStationReservation() {
+  return Promise.all([
+    set(ref(database, `${BMS_PATH}/Path_Name`), 0),
+    setStationChargingRelay(null, false),
+  ]);
 }
 
 // Retained for callers that need the complete automatic handshake.
@@ -107,6 +120,20 @@ export async function executeStationPath(stationId) {
 
 export function cancelStationPath() {
   return update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 });
+}
+
+export function setStationChargingRelay(stationId, on) {
+  if (on && (!Number.isInteger(stationId) || stationId < 1 || stationId > 4)) {
+    return Promise.reject(new Error(`Unknown station ${stationId}.`));
+  }
+  // Charging relays are mutually exclusive. Starting one station always
+  // clears Relay1–Relay4 first, preventing an old reservation relay (such as
+  // Relay2) from remaining ON after ultrasonic arrival at another station.
+  const values = {};
+  for (let id = 1; id <= 4; id += 1) {
+    values[`Relay${id}`] = on && id === stationId ? 1 : 0;
+  }
+  return update(ref(database, STATIONS_PATH), values);
 }
 
 // Mirror each station's physical switch and ultrasonic state to its indicator
