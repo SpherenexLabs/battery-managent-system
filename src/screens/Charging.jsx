@@ -1,5 +1,5 @@
 import { getChargingPower, useEvDispatch, useEvState } from '../state/store.js';
-import { PageHeader, ProgressBar } from '../components/ui.jsx';
+import { InfoNote, PageHeader, ProgressBar } from '../components/ui.jsx';
 import { IconCar, IconCheck, IconTarget } from '../components/icons.jsx';
 import { THERMAL_LIMITS } from '../state/store.js';
 import Scene3D from '../components/Scene3D.jsx';
@@ -27,10 +27,21 @@ export default function Charging() {
       ? Math.max(0, Math.floor((state.clock.getTime() - charging.sessionStartedAt) / 1000))
       : 0;
   const energyDeliveredWh = Number.isFinite(charging.energyWh) ? charging.energyWh : 0;
+  const vehicleFull = charging.mode === 'complete' || (state.soc != null && state.soc >= 100);
+  const selectedRelayValue =
+    state.selectedStationId != null ? state.stationRelays[state.selectedStationId - 1] : null;
+  const relayOn = selectedRelayValue === 1;
+  const waitingForRelay = charging.relayRequested && !relayOn;
 
   return (
     <div className="screen">
       <PageHeader title="Screen 4 — Wireless Charging" />
+
+      {vehicleFull && (
+        <InfoNote title="Vehicle Full — 100% Charged">
+          Charging stopped automatically. The vehicle battery is full and ready to use.
+        </InfoNote>
+      )}
 
       <Scene3D
         title="Live Vehicle Route Position"
@@ -52,6 +63,10 @@ export default function Charging() {
               <IconTarget className={charging.coilAligned ? 'kv-icon ok' : 'kv-icon muted'} /> Coil Alignment{' '}
               {charging.coilAligned ? 'Confirmed' : 'Pending'}
             </span>
+            <span className={relayOn ? 'text-ok' : waitingForRelay ? 'text-warn' : 'muted'}>
+              <IconCheck className={relayOn ? 'kv-icon ok' : waitingForRelay ? 'kv-icon warn' : 'kv-icon muted'} />
+              Station Relay {relayOn ? 'ON' : waitingForRelay ? 'TURNING ON…' : 'OFF'}
+            </span>
             {coolingActive && (
               <span className="text-warn">
                 <IconCheck className="kv-icon warn" /> Cooling Active (pump {state.pumpRelay ? 'ON' : 'OFF'} · fan {state.fanRelay ? 'ON' : 'OFF'})
@@ -61,7 +76,9 @@ export default function Charging() {
 
           <div className="card charge-status-card">
             <h3 className="card-title">Charging Status</h3>
-            <p className={`charge-status-text ${charging.mode}`}>{MODE_LABEL[charging.mode]}</p>
+            <p className={`charge-status-text ${charging.mode}`}>
+              {vehicleFull ? 'Vehicle Full' : waitingForRelay ? 'Waiting for station relay' : MODE_LABEL[charging.mode]}
+            </p>
 
             <div className="charge-metrics">
               <div>
@@ -101,6 +118,7 @@ export default function Charging() {
                 <SafetyCheck ok label="Battery connected" />
                 <SafetyCheck ok={tempSafe} label="Temperature safe" />
                 <SafetyCheck ok={charging.arrivalConfirmed} label="Station confirmed" />
+                <SafetyCheck ok={relayOn} label="Station relay ON" />
               </div>
             </div>
 
@@ -128,7 +146,15 @@ export default function Charging() {
           <div className="charge-visual">
             <IconCar width="90" height="90" />
             <div className="charge-visual-status">
-              <strong>{charging.active ? 'Charging in progress' : 'Charging on standby'}</strong>
+              <strong>
+                {vehicleFull
+                  ? 'Vehicle Full'
+                  : waitingForRelay
+                    ? 'Vehicle reached — turning relay ON'
+                    : charging.active
+                      ? 'Relay ON — charging in progress'
+                      : 'Charging on standby'}
+              </strong>
               <span>{state.soc != null ? `${Math.round(state.soc)}% battery level` : 'Waiting for BMS SOC data'}</span>
             </div>
             <div className="charge-pad" aria-label={`Battery charge progress: ${Math.round(chargePct)}%`}>
@@ -137,7 +163,13 @@ export default function Charging() {
             <div className="charge-visual-readout">
               <span>Live BMS power</span>
               <strong>{`${livePower.toFixed(1)} W`}</strong>
-              <span>{charging.active ? `${formatDuration(sessionSeconds)} active` : 'Session not active'}</span>
+              <span>
+                {charging.active
+                  ? `${formatDuration(sessionSeconds)} active`
+                  : waitingForRelay
+                    ? 'Waiting for relay confirmation'
+                    : 'Session not active'}
+              </span>
             </div>
           </div>
 
@@ -146,7 +178,7 @@ export default function Charging() {
             <button
               type="button"
               className="btn btn-disabled btn-block"
-              disabled={charging.active}
+              disabled={charging.active || charging.relayRequested || vehicleFull || !charging.arrivalConfirmed}
               onClick={() => dispatch({ type: 'TOGGLE_CHARGING_ACTIVE' })}
             >
               ▶ Start Charging
@@ -156,12 +188,20 @@ export default function Charging() {
             <button
               type="button"
               className="btn btn-accent btn-block"
-              disabled={!charging.active}
+              disabled={!charging.active && !charging.relayRequested}
               onClick={() => dispatch({ type: 'TOGGLE_CHARGING_ACTIVE' })}
             >
               ■ Stop Charging
             </button>
-            <p className="muted small center">{charging.active ? 'Session active' : 'Session idle'}</p>
+            <p className="muted small center">
+              {vehicleFull
+                ? 'Battery fully charged'
+                : charging.active
+                  ? 'Relay confirmed — charging calculation active'
+                  : waitingForRelay
+                    ? 'Waiting for Relay confirmation from Firebase'
+                    : 'Session idle'}
+            </p>
           </div>
         </div>
       </div>

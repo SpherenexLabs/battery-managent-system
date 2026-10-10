@@ -23,9 +23,11 @@ export default function Navigation() {
     };
   }, [targetStation, state.vehicleLocation]);
 
-  const slotDistance = targetStation?.slotValue >= 0 ? targetStation.slotValue : null;
+  const slotDistance = targetStation?.slotValue > 0 ? targetStation.slotValue : null;
   const statusLabel =
-    state.vehicleStatus === 'charging'
+    state.charging.mode === 'complete'
+      ? 'Vehicle Full'
+      : state.vehicleStatus === 'charging'
       ? `Charging at ${targetStation?.name || 'station'}`
       : state.vehicleStatus === 'arrived'
         ? `Arrived at ${targetStation?.name || 'station'}`
@@ -83,7 +85,7 @@ export default function Navigation() {
         <div className="kv-list">
           <Metric label="Display station" value={targetStation?.name || '—'} />
           <Metric label="Controller Path_Name" value={targetStation ? state.pathName : '—'} />
-          <Metric label="Execute_Path" value={state.executePath} />
+          <Metric label="Execute_Path" value={state.executePathStatus || state.executePath} />
           <Metric label="Slot distance" value={slotDistance == null ? 'Waiting' : `${slotDistance} cm`} />
           <Metric label="GPS distance" value={liveDirection ? `${liveDirection.km.toFixed(2)} km` : '—'} />
           <Metric label="Compass bearing" value={liveDirection?.compass || '—'} />
@@ -94,13 +96,16 @@ export default function Navigation() {
           <Metric label="Voltage" value={targetStation?.voltage == null ? '—' : `${targetStation.voltage.toFixed(2)} V`} />
           <Metric label="Current" value={targetStation?.current == null ? '—' : `${targetStation.current.toFixed(2)} A`} />
           <Metric label="Switch" value={targetStation?.switchValue == null ? '—' : targetStation.switchEngaged ? '1 · ENGAGED' : '0 · READY'} />
+          <Metric label="Charging relay" value={targetStation?.relayValue == null ? 'WAITING' : targetStation.relayValue ? '1 · ON' : '0 · OFF'} />
         </div>
 
         <h3 className="side-title">Journey</h3>
         <ul className="route-progress">
           <JourneyStep done={state.routeSteps.reservationConfirmed} label="Reservation sent" />
           <JourneyStep done={state.routeSteps.followingTrack || state.routeSteps.arrived} label="Following controller path" />
-          <JourneyStep done={state.routeSteps.arrived} label="Arrival detected" />
+          <JourneyStep done={state.routeSteps.arrived} label="Vehicle reached station (ultrasonic distance < 20 cm)" />
+          <JourneyStep done={state.charging.relayRequested} label="Station relay ON requested" />
+          <JourneyStep done={state.charging.active} label="Relay confirmed — charging calculation active" />
         </ul>
 
         <button type="button" className="btn btn-danger btn-block" onClick={stopVehicle}>

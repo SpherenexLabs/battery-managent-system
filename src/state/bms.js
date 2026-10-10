@@ -5,12 +5,10 @@ import { database } from '../firebase.js';
 export const BMS_PATH = 'BMS_5578';
 export const STATIONS_PATH = 'BMS';
 
-// Path_Name uses the same number as the station selected in the UI.
+// Each station sends its own number to the controller as Path_Name.
 export const STATION_PATH_NAME = Object.freeze({ 1: 1, 2: 2, 3: 3, 4: 4 });
 const PATH_READY_TIMEOUT_MS = 30000;
-const PATH_COMMAND_DURATION_MS = 5000;
-const RESERVED_STATION_RED_DISTANCE_CM = 10;
-let pathResetTimer = null;
+const STATION_RED_DISTANCE_CM = 20;
 
 // Saved auto-drive routes. Kept in a sibling node rather than inside the
 // telemetry node so the controller's live stream carries only live values.
@@ -87,57 +85,59 @@ function waitForExecutePathReady(timeoutMs = PATH_READY_TIMEOUT_MS) {
   });
 }
 
-// Start the controller's built-in path routine using its two-step handshake:
-// Execute_Path = 1 -> wait for Execute_Path = "Ready" -> Path_Name = station.
-export async function executeStationPath(stationId) {
+// The station screen exposes the controller handshake as two separate buttons.
+// Initialize writes Execute_Path first; Reserve writes the selected Path_Name.
+export async function initializeStationPath() {
+  await set(ref(database, `${BMS_PATH}/Execute_Path`), 1);
+  await waitForExecutePathReady();
+}
+
+export async function reserveStationPath(stationId) {
   const pathName = STATION_PATH_NAME[stationId];
   if (pathName == null) throw new Error(`Unknown station ${stationId}.`);
-  if (pathResetTimer != null) clearTimeout(pathResetTimer);
-  try {
-    await set(ref(database, `${BMS_PATH}/Execute_Path`), 1);
-    await waitForExecutePathReady();
-    await set(ref(database, `${BMS_PATH}/Path_Name`), pathName);
-  } catch (error) {
-    await update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 }).catch(() => {});
-    throw error;
-  }
-  pathResetTimer = setTimeout(() => {
-    pathResetTimer = null;
-    update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 }).catch((error) => {
-      console.error('Could not reset the five-second path command:', error);
-    });
-  }, PATH_COMMAND_DURATION_MS);
+  await set(ref(database, `${BMS_PATH}/Path_Name`), pathName);
   return pathName;
 }
 
+// Retained for callers that need the complete automatic handshake.
+export async function executeStationPath(stationId) {
+  await initializeStationPath();
+  return reserveStationPath(stationId);
+}
+
 export function cancelStationPath() {
-  if (pathResetTimer != null) {
-    clearTimeout(pathResetTimer);
-    pathResetTimer = null;
-  }
   return update(ref(database, BMS_PATH), { Execute_Path: 0, Path_Name: 0 });
 }
 
-// Mirror each station's physical switch to its two indicator outputs and relay.
-// A confirmed reservation also turns only its station red when that station's
-// ultrasonic distance drops below 10 cm. The relay continues to follow only
-// the physical switch, so this proximity indication does not change hardware.
-export function syncStationIndicators(switches, slots = [], reservedStationId = null) {
+// Mirror each station's physical switch and ultrasonic state to its indicator
+// outputs. Any valid reading below 20 cm turns that station red. The charging
+// relay stays OFF until the reserved station is confirmed below 20 cm.
+export function syncStationIndicators(
+  switches,
+  slots = [],
+  reservedStationId = null,
+  chargingStationId = null
+) {
   const values = {};
   switches.forEach((value, index) => {
-    if (value === 0 || value === 1) {
-      const stationId = index + 1;
-      const slotValue = slots[index];
-      const reservedAndClose =
-        stationId === reservedStationId &&
-        typeof slotValue === 'number' &&
-        slotValue >= 0 &&
-        slotValue < RESERVED_STATION_RED_DISTANCE_CM;
-      const indicatorEngaged = value === 1 || reservedAndClose;
+    const stationId = index + 1;
+    const hasSwitchReading = value === 0 || value === 1;
+    const slotValue = slots[index];
+    const hasSlotReading = typeof slotValue === 'number';
+    // The reserved station must remain controllable even if its optional
+    // switch telemetry is unavailable, especially so its relay can turn off.
+    if (hasSwitchReading || hasSlotReading || stationId === reservedStationId) {
+      const ultrasonicClose =
+        typeof slotValue === 'number' && slotValue > 0 && slotValue < STATION_RED_DISTANCE_CM;
+      const switchEngaged = value === 1;
+      const chargingHere = stationId === chargingStationId;
+      const indicatorEngaged = switchEngaged || ultrasonicClose || chargingHere;
 
       values[`green${stationId}`] = indicatorEngaged ? 0 : 1;
       values[`red${stationId}`] = indicatorEngaged ? 1 : 0;
-      values[`Relay${index + 1}`] = value;
+      // The physical switch only controls the ready/engaged indicator. It must
+      // never energise charging before ultrasonic arrival is confirmed.
+      values[`Relay${index + 1}`] = chargingHere ? 1 : 0;
     }
   });
   return Object.keys(values).length > 0 ? update(ref(database, STATIONS_PATH), values) : Promise.resolve();
@@ -152,14 +152,31 @@ export function setHeat(percent) {
   return set(ref(database, `${BMS_PATH}/Heat`), Math.max(0, Math.min(100, Math.round(percent))));
 }
 
-// Relay1 drives the coolant pump, Relay2 the cooling fan. Both go to 1 while
-// the battery is above its temperature limit and back to 0 once it is safe.
+// Demo thermal model writes the simulated battery temperature while the robot
+// moves or cools. Keep one decimal place to avoid noisy Firebase updates.
+export function setTemperature(celsius) {
+  const value = Math.round(Number(celsius) * 10) / 10;
+  if (!Number.isFinite(value)) return Promise.reject(new Error('Invalid temperature value.'));
+  return Promise.all([
+    set(ref(database, `${BMS_PATH}/Temp`), value),
+    set(ref(database, `${STATIONS_PATH}/Temp`), value),
+  ]);
+}
+
+// Relay1 drives the coolant pump, Relay2 the cooling fan. Thermal/manual
+// control and an active charging session can request these outputs.
 export function setPumpRelay(on) {
   return set(ref(database, `${BMS_PATH}/Relay1`), on ? 1 : 0);
 }
 
 export function setFanRelay(on) {
-  return set(ref(database, `${BMS_PATH}/Relay2`), on ? 1 : 0);
+  const value = on ? 1 : 0;
+  // The vehicle controller exposes Relay2, while the station/thermal
+  // controller exposes the same physical fan as Relay. Keep both in sync.
+  return Promise.all([
+    set(ref(database, `${BMS_PATH}/Relay2`), value),
+    set(ref(database, `${STATIONS_PATH}/Relay`), value),
+  ]);
 }
 
 export function setCooling(on) {
@@ -173,7 +190,7 @@ export function setCooling(on) {
 // Each prototype station exposes one ultrasonic slot sensor. A short reading
 // means occupied; -1 represents a clear bay with no sensor echo.
 export function setStationOccupied(stationId, occupied) {
-  return set(ref(database, `${BMS_PATH}/Slot${stationId}`), occupied ? 20 : -1);
+  return set(ref(database, `${BMS_PATH}/Slot${stationId}`), occupied ? 4 : -1);
 }
 
 // ---------------------------------------------------------------------------

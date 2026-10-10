@@ -103,6 +103,7 @@ export default function Overview() {
 
   const soh = healthCondition(state.soh);
   const chargeState = chargeStateLabel(state);
+  const vehicleStatusLabel = state.charging.mode === 'complete' ? 'Vehicle Full' : VEHICLE_LABEL[state.vehicleStatus];
   // Stations are already sorted nearest-first; prefer ones with a free bay.
   const nearestStations = [...state.stations]
     .sort((a, b) => (b.status === 'available') - (a.status === 'available'))
@@ -275,7 +276,7 @@ export default function Overview() {
           <IconCar />
           <div>
             <span className="status-strip-label">Vehicle</span>
-            <strong>{VEHICLE_LABEL[state.vehicleStatus]}</strong>
+            <strong>{vehicleStatusLabel}</strong>
           </div>
         </div>
         <div className="status-strip-item">

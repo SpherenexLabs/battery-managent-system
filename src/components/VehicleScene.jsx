@@ -493,7 +493,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
         drive.speed *= 0.85;
       } else if (spot) {
         const selectedSlot = live.slots?.[target - 1];
-        const sensorAvailable = typeof selectedSlot === 'number' && selectedSlot >= 0;
+        const sensorAvailable = typeof selectedSlot === 'number' && selectedSlot > 0;
         const reportedProgress = Math.max(0, Math.min(1, (live.navProgress || 0) / 100));
         if (live.vehicleStatus === 'arrived' || charging) visualProgress = 1;
         else if (routeActive && sensorAvailable) visualProgress += (reportedProgress - visualProgress) * Math.min(1, dt * 5);
@@ -558,8 +558,8 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
         });
       }
 
-      // SwitchN = 1 turns a station red. A reserved station also turns red when
-      // its ultrasonic reading is below 10 cm. The translucent beam follows
+      // SwitchN = 1 or an ultrasonic reading below 20 cm turns a station red.
+      // The translucent beam follows
       // live station voltage so power changes are visible in the 3D map.
       Object.entries(stations).forEach(([id, station]) => {
         const stationState = live.stations?.find((item) => item.id === Number(id));
@@ -664,7 +664,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
           <strong>Station {state.selectedStationId} · Path {state.pathName || '—'}</strong>
           <span>
             {Math.round(state.navProgress)}% · Slot distance{' '}
-            {state.slots[state.selectedStationId - 1] >= 0 ? `${state.slots[state.selectedStationId - 1]} cm` : 'waiting'}
+            {state.slots[state.selectedStationId - 1] > 0 ? `${state.slots[state.selectedStationId - 1]} cm` : 'waiting'}
           </span>
         </div>
       )}

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader, InfoNote, StatusDot } from '../components/ui.jsx';
 import { IconBolt, IconCheck, IconPulse, IconStation, IconTarget } from '../components/icons.jsx';
-import { executeStationPath, STATION_PATH_NAME } from '../state/bms.js';
+import { initializeStationPath, reserveStationPath, STATION_PATH_NAME } from '../state/bms.js';
 import Scene3D from '../components/Scene3D.jsx';
 
 const STATION_META = {
@@ -16,20 +16,38 @@ const STATION_META = {
 export default function Stations() {
   const state = useEvState();
   const dispatch = useEvDispatch();
-  const [busyId, setBusyId] = useState(null);
+  const [busyAction, setBusyAction] = useState(null);
+  const [controllerInitialized, setControllerInitialized] = useState(false);
   const [error, setError] = useState('');
+  const controllerReady = state.executePathStatus?.trim().toLowerCase() === 'ready';
+  const initializationComplete = controllerInitialized || controllerReady;
 
-  async function reserveAndGo(station) {
-    if (busyId != null || station.status !== 'available') return;
-    setBusyId(station.id);
+  async function initializePath(station) {
+    if (busyAction != null || station.status !== 'available') return;
+    setBusyAction({ id: station.id, type: 'initialize' });
     setError('');
     try {
-      const pathName = await executeStationPath(station.id);
+      await initializeStationPath();
+      setControllerInitialized(true);
+    } catch (requestError) {
+      setControllerInitialized(false);
+      setError(requestError?.message || 'Firebase did not accept Execute_Path = 1.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function reserveAndGo(station) {
+    if (busyAction != null || station.status !== 'available' || !controllerReady) return;
+    setBusyAction({ id: station.id, type: 'reserve' });
+    setError('');
+    try {
+      const pathName = await reserveStationPath(station.id);
       dispatch({ type: 'RESERVE_STATION', id: station.id, pathName });
     } catch (requestError) {
-      setError(requestError?.message || 'Firebase did not accept the path command.');
+      setError(requestError?.message || 'Firebase did not accept the station Path_Name.');
     } finally {
-      setBusyId(null);
+      setBusyAction(null);
     }
   }
 
@@ -37,18 +55,18 @@ export default function Stations() {
     <div className="screen stations-screen">
       <PageHeader
         title="4 Live Charging Stations"
-        subtitle="Reserve a station once; the controller acknowledges Execute Path before Firebase sends the selected station number."
+        subtitle="Initialize Execute_Path first. When the controller reports Ready, reserve a station to send its number as Path_Name."
       />
 
       {error && (
-        <InfoNote tone="warning" title="Reservation command failed">
+        <InfoNote tone="warning" title="Station command failed">
           {error}
         </InfoNote>
       )}
 
       <Scene3D
         title="Live Four-Station Map"
-        hint="Green means ready. Red means the switch is engaged, or the reserved station is below 10 cm."
+        hint="Green means ready. Red means the switch is engaged or that station's ultrasonic reading is below 20 cm."
         mode="stations"
         height={390}
       />
@@ -57,8 +75,15 @@ export default function Stations() {
         {state.stations.map((station) => {
           const meta = STATION_META[station.status] || STATION_META.available;
           const isSelected = station.id === state.selectedStationId;
-          const isBusy = busyId === station.id;
-          const canReserve = station.status === 'available' && state.reservationStatus !== 'confirmed' && busyId == null;
+          const isInitializing = busyAction?.id === station.id && busyAction.type === 'initialize';
+          const isReserving = busyAction?.id === station.id && busyAction.type === 'reserve';
+          const isInitialized = initializationComplete;
+          const canOperate =
+            station.status === 'available' &&
+            state.reservationStatus !== 'confirmed' &&
+            busyAction == null;
+          const canInitialize = canOperate && !isInitialized;
+          const canReserve = canOperate && isInitialized;
           return (
             <article
               key={station.id}
@@ -79,7 +104,7 @@ export default function Stations() {
                 <IconStation width="48" height="48" />
                 <span className={`station-switch-lamp ${station.indicatorEngaged ? 'engaged' : 'ready'}`}>
                   {station.ultrasonicEngaged
-                    ? 'RED · ULTRA < 10 CM'
+                    ? 'RED · ULTRA < 20 CM'
                     : station.switchValue == null
                       ? 'Switch —'
                       : station.switchEngaged
@@ -89,7 +114,7 @@ export default function Stations() {
               </div>
 
               <div className="station-slot-summary" aria-label={`${station.name} slot and path data`}>
-                <span><strong>{station.slotValue >= 0 ? `${station.slotValue} cm` : '—'}</strong> vehicle distance</span>
+                <span><strong>{station.slotValue > 0 ? `${station.slotValue.toFixed(1)} cm` : 'NO ECHO'}</strong> vehicle distance</span>
                 <span><strong>{station.availableSlots}</strong> available</span>
                 <span><strong>{STATION_PATH_NAME[station.id]}</strong> controller path</span>
               </div>
@@ -116,16 +141,30 @@ export default function Stations() {
                   value={state.stationDataLoaded && state.connectivity.online ? 'LIVE' : 'WAITING'}
                   active={state.stationDataLoaded && state.connectivity.online}
                 />
+                <StationReadout
+                  icon={<IconBolt />}
+                  label="Charging relay"
+                  value={station.relayValue == null ? 'NO DATA' : station.relayValue ? '1 · ON' : '0 · OFF'}
+                  active={station.relayValue === 1}
+                />
               </div>
 
               <div className="station-actions">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  disabled={!canInitialize}
+                  onClick={() => initializePath(station)}
+                >
+                  {isInitializing ? 'Waiting for Ready…' : isInitialized ? 'Initialized' : 'Initialize'}
+                </button>
                 <button
                   type="button"
                   className="btn btn-accent"
                   disabled={!canReserve}
                   onClick={() => reserveAndGo(station)}
                 >
-                  {isBusy ? 'Waiting for Ready…' : isSelected ? 'Reserved' : 'Reserve & Go'}
+                  {isReserving ? 'Reserving…' : isSelected ? 'Reserved' : `Reserve Station ${station.id}`}
                 </button>
               </div>
             </article>

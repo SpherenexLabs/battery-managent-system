@@ -1,14 +1,15 @@
-import { useEvState } from '../state/store.js';
+import { useEvDispatch, useEvState } from '../state/store.js';
 import { PageHeader } from '../components/ui.jsx';
 import { IconClock, IconShield } from '../components/icons.jsx';
 import { THERMAL_LIMITS } from '../state/store.js';
-import { setCooling, setFanRelay, setHeat, setPumpRelay } from '../state/bms.js';
+import { setHeat, setPumpRelay } from '../state/bms.js';
 import { formatClock } from '../utils/format.js';
 
 export default function Thermal() {
   const state = useEvState();
-  const { temperature, pumpRelay, fanRelay, heatPercent, connectivity } = state;
-  const coolingOn = pumpRelay === 1 || fanRelay === 1;
+  const dispatch = useEvDispatch();
+  const { temperature, pumpRelay, fanRelay, heatPercent, connectivity, manualFanOn } = state;
+  const coolingOn = pumpRelay === 1 || manualFanOn;
 
   const tempHigh = temperature != null && temperature >= THERMAL_LIMITS.WARN_TEMP;
   const critical = temperature != null && temperature >= THERMAL_LIMITS.CRITICAL_TEMP;
@@ -19,7 +20,7 @@ export default function Thermal() {
         <span className="badge badge-neutral">Live BMS data</span>
         <div className="thermal-topbar-right">
           <span className="badge badge-outline">
-            <IconShield /> Manual control
+            <IconShield /> Automatic + manual control
           </span>
           <span className="badge badge-plain">
             <IconClock /> {formatClock(state.clock)}
@@ -32,7 +33,7 @@ export default function Thermal() {
 
       <PageHeader
         title="Artificial Battery Heating & Thermal Control"
-        subtitle="Manual heating and cooling control with live temperature feedback."
+        subtitle="Use Heat % to raise temperature. After Execute_Path reports Ready, the fan cycles 5 seconds ON and 5 seconds OFF regardless of direction or temperature."
         showBadge={false}
       />
 
@@ -74,10 +75,26 @@ export default function Thermal() {
             </div>
 
             <div className="thermal-test-actions">
-              <button type="button" className="btn btn-accent" disabled={pumpRelay === 1 && fanRelay === 1} onClick={() => setCooling(true)}>
+              <button
+                type="button"
+                className="btn btn-accent"
+                disabled={pumpRelay === 1 && manualFanOn}
+                onClick={() => {
+                  setPumpRelay(true);
+                  dispatch({ type: 'SET_MANUAL_FAN', on: true });
+                }}
+              >
                 Turn cooling ON
               </button>
-              <button type="button" className="btn btn-outline" disabled={!coolingOn} onClick={() => setCooling(false)}>
+              <button
+                type="button"
+                className="btn btn-outline"
+                disabled={!coolingOn}
+                onClick={() => {
+                  setPumpRelay(false);
+                  dispatch({ type: 'SET_MANUAL_FAN', on: false });
+                }}
+              >
                 Turn cooling OFF
               </button>
             </div>
@@ -91,10 +108,10 @@ export default function Thermal() {
               </button>
               <button
                 type="button"
-                className={fanRelay ? 'btn btn-accent' : 'btn btn-outline'}
-                onClick={() => setFanRelay(!fanRelay)}
+                className={manualFanOn ? 'btn btn-accent' : 'btn btn-outline'}
+                onClick={() => dispatch({ type: 'SET_MANUAL_FAN', on: !manualFanOn })}
               >
-                Fan (Relay2): {fanRelay ? 'ON' : 'OFF'}
+                Manual Fan: {manualFanOn ? 'ON' : 'OFF'}
               </button>
             </div>
           </div>
@@ -131,7 +148,8 @@ export default function Thermal() {
             </div>
 
             <p className="muted small">
-              Fully manual — the heating level you set is written to Firebase as-is and is never cut off automatically.
+              Heat % controls the temperature-rise rate. At 30 °C the heater turns OFF and the fan turns ON;
+              temperature then falls by 0.5 °C per second. The fan turns OFF at 27 °C.
             </p>
           </div>
         </div>

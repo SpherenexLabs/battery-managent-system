@@ -9,16 +9,18 @@ coolant pump relay, and cooling fan relay.
 > **Current station-control workflow:** Automatic navigation now uses the controller's
 > built-in `BMS_5578/Execute_Path` and `BMS_5578/Path_Name` fields. Reserving first
 > writes `Execute_Path = 1`, waits until the controller writes `Ready` back to that
-> field, and only then writes the selected station number to `Path_Name`. The `/BMS` branch
+> field, and only then writes the mapped controller path to `Path_Name` (Station 1
+> writes path 2; Station 2 writes path 1). The `/BMS` branch
 > supplies four-station `Current*`, `Voltage*`, and `Switch*` (or `Relay*`) telemetry;
 > the dashboard mirrors those switches to complementary `green1`…`green4`,
-> `red1`…`red4`, and `Relay1`…`Relay4` outputs. Station numbers map directly to
-> controller path names. Older saved-route
+> `red1`…`red4`, and `Relay1`…`Relay4` outputs. A charging relay is first energised only
+> when the reserved station's ultrasonic distance is below 20 cm, then remains latched
+> until Stop or 100% completion. Older saved-route
 > descriptions later in this document describe the retained legacy helpers, not the
 > current Auto-mode UI.
 
-After the Ready handshake, the selected `Path_Name` command is held for five seconds.
-The dashboard then resets both `Execute_Path` and `Path_Name` to `0`.
+After the Ready handshake, the selected `Path_Name` remains set. The dashboard does
+not automatically write `0`; only an explicit **Stop vehicle** command clears it.
 
 The dashboard covers the full journey: **monitor the battery → detect a low/overheat
 condition → find and reserve a nearby wireless charging station → drive the vehicle
@@ -51,17 +53,17 @@ health and alerts.**
 | Area | What it does |
 | --- | --- |
 | Live telemetry | Vehicle voltage, station voltage, current, temperature, heating level, pump relay, fan relay and drive direction — streamed from Firebase with no polling |
-| Battery state | SOC derived from vehicle pack voltage, SOH estimated from temperature/voltage |
+| Battery state | Live SOC is voltage-derived before a trip; reservation starts a 50–75% journey simulation that drains toward 25% while moving and rises only during relay-confirmed charging |
 | Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `BMS_5578/direction` |
-| Auto driving | One-click station reservation writes `Execute_Path = 1`, waits for `Ready`, then writes the station number to `Path_Name` |
+| Auto driving | One-click station reservation writes `Execute_Path = 1`, waits for `Ready`, then writes the mapped controller path to `Path_Name` |
 | Live path feedback | `Slot1`…`Slot4` provide vehicle-to-station distance and drive the journey progress/arrival animation |
-| Reserve & go | Station 1 → path 1, Station 2 → path 2, Station 3 → path 3, Station 4 → path 4 |
+| Reserve & go | Station 1 → path 2, Station 2 → path 1, Station 3 → path 3, Station 4 → path 4 |
 | 3D animation | The same scaled 120 × 160 cm route map on Overview, Drive Control and Charging, with a top-view car, current-step guidance, completed-path tracking and final-position reporting |
 | 360° camera | Orbit the scene a full turn with the mouse — drag to look around, scroll to zoom, right-drag to pan, one button to reset |
 | Alerts | 12 rule-based alerts covering low battery, overheating, voltage/current/SOC instability, slow charging, repeated overheat, frequent cooling, and BMS offline |
-| Thermal safety | Automatic pump + fan cooling with hysteresis, heating safety cut-off, fast-charge downgrade, and automatic charging pause on critical temperature |
+| Thermal safety | After the `Execute_Path = Ready` handshake, Relay2 cycles 5 seconds ON / 5 seconds OFF regardless of direction or temperature. Heat % still controls temperature rise, and a 30 °C safety request overrides the cycle until cooling reaches 27 °C |
 | Stations | 4 live stations with switch-driven green/red state, current/voltage/power graphs, slot distance, reservation, and Three.js animation |
-| Wireless charging | Arrival + coil-alignment confirmation, charge modes, live power, session timer, and energy integration |
+| Wireless charging | A valid ultrasonic echo below 20 cm requests the reserved station relay; charging time/energy begin only after `RelayN = 1` feedback |
 | Health | Alert table with severity/status, event log with real timestamps, and operator acknowledgement |
 
 ---
@@ -142,8 +144,11 @@ and the drive controls write on click:
 
 | Controller | Trigger | Write |
 | --- | --- | --- |
-| Automatic cooling | Temperature ≥ 65 °C **or** heating level ≥ 65 % | `Relay1 = 1` **and** `Relay2 = 1`; both released only when temperature ≤ 60 °C **and** heat < 65 % (hysteresis prevents relay chatter) |
-| Heating safety cut-off | Temperature ≥ 65 °C while `Heat` > 0 | `Heat = 0` — overrides the operator's manual slider |
+| Dashboard heating | `Heat` slider above 0% and fan OFF | Raises `Temp` from 0.1–0.6 °C/s according to Heat % |
+| Manual fan override | Operator presses Manual Fan ON/OFF | Keeps both fan relay paths ON until Manual OFF is pressed; automatic timers cannot cancel the override |
+| Path fan cycle | `Execute_Path` reports `Ready` and the path reservation is confirmed | `BMS_5578/Relay2` and `/BMS/Relay` cycle 5 seconds ON, 5 seconds OFF, independent of direction and temperature |
+| Automatic fan | Temperature ≥ 30 °C | Both fan relay paths become `1`; temperature cools by 0.5 °C/s and cannot rise while the fan is ON |
+| Fan hysteresis | Temperature ≤ 27 °C | Both fan relay paths return to `0` |
 | Safety stop | Vehicle arrives, or the operator halts it | `direction = 'S'` |
 | Manual joystick | Operator presses a pad button | `direction = 'F' \| 'B' \| 'L' \| 'R' \| 'S'` |
 | Auto route playback | Each step's turn comes up | That step's `direction`, held for the step's duration, then `'S'` at the end |
@@ -165,24 +170,25 @@ A station's position is resolved in priority order:
 ### 3.5 Reservation → drive → charging chain
 
 ```
-SELECT_STATION ──▶ reservationStatus: 'pending'
+RESERVE_STATION ──▶ Execute_Path = 1 ──▶ wait for "Ready"
        │
-SELECT_ROUTE ──▶ one of the saved auto routes is chosen to drive
+Path_Name = mapped controller path ──▶ vehicleStatus: 'moving'
        │
-CONFIRM_RESERVATION ──▶ vehicleStatus: 'moving', driveMode 'auto',
-       │                 the chosen route starts playing, jumps to Drive Control
-PLAYBACK_TICK x N ──▶ each step's letter written for its duration
+selected SlotN > 0 and < 20 cm ──▶ 'S' written, vehicle reached + alignment confirmed
        │
-last step ends ──▶ 'S' written, vehicleStatus: 'arrived',
-       │            CONFIRM_ARRIVAL after 900 ms
-START_CHARGING_SESSION ──▶ coilAligned, charging active, jumps to Charging
+selected RelayN = 1 requested ──▶ wait for `/BMS/RelayN = 1` feedback
        │
-BMS_UPDATE ──▶ SOC 100 % ──▶ mode 'complete', session ends
+relay confirmed ON ──▶ charging timer/energy calculation starts, Charging opens
+       │
+TICK ──▶ simulated SOC rises to 100 % ──▶ charging stops and "Vehicle Full" is displayed
+       │                         selected RelayN returns to OFF
 ```
 
-Reaching the **end of the route is what marks arrival** — there is no separate
-arrival timer or sensor. Playback is cancelled (and `S` written) by switching to
-Manual, pressing **Stop vehicle**, or deleting the running route.
+Automatic charging is sensor-driven and uses only the reserved station's ultrasonic
+field (`Slot1`…`Slot4`). Only a value greater than 0 and below 20 cm triggers arrival;
+`0`, `-1`, and values of 20 cm or more cannot start it. After arrival, the relay request
+is latched so sensor fluctuations cannot interrupt charging. The ultrasonic value detects arrival only; charging calculations
+remain stopped until the selected station's relay reports ON.
 
 Safety can interrupt this chain at any point: critical temperature pauses charging, and
 fast mode is blocked whenever the battery is above the warning limit.
@@ -246,12 +252,16 @@ All optional — supply them under `/BMS_5578` to replace the prototype defaults
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `Slot1` … `Slot4` | number | Ultrasonic bay distance in cm. `-1` = free; `0`–`40` cm = occupied. Also written by the "Simulate" buttons |
+| `Slot1` … `Slot4` | number | Ultrasonic distance in cm. `0`/`-1` = invalid or no echo; `1`–`40` cm = object/robot detected; above 40 cm = not yet at station |
 | `Station{N}Filled` | number | Occupied bays, overrides the slot-sensor inference |
 | `Station{N}Total` | number | Total bays at that station (default 1) |
 | `Station{N}Lat` / `Station{N}Lng` | number | Real station coordinates |
 | `Station{N}Name` | string | Display name for that station |
 | `Station{N}Current` / `Station{N}Voltage` | number | Electrical readings for stations 2–4 (station 1 uses `Current` and `Voltage2`) |
+
+The station-control branch `/BMS` exposes `Relay1`…`Relay4`. The dashboard writes the
+selected relay to `1` after ultrasonic arrival and waits for that same relay value to be
+observed before starting the charging timer and energy integration.
 
 ### Example live snapshot
 
@@ -283,6 +293,12 @@ vehicle pack voltage (`Voltage1`) and clamped to 0–100 %:
 SOC = (Voltage1 − 9.5) / (12.6 − 9.5) × 100
 ```
 
+When a station reservation starts, journey simulation takes over: SOC is clamped into
+the requested 50–75% starting range, falls by 0.1 percentage point per second while
+the vehicle is moving (never below 25%), and rises by 0.5 point per second only while the selected
+station relay is confirmed ON. Live voltage continues to be displayed but does not
+overwrite the simulated journey SOC.
+
 > **You will almost certainly need to change this.** `9.5 V` and `12.6 V` are the
 > pack's empty and full voltages. If your sensor reports a scaled value (the live node
 > currently reads `0.71`), every reading falls below the empty point, SOC pins at 0 %
@@ -308,15 +324,15 @@ SOH = 100 − min(30, (Temp − 45) × 1.5)   when Temp > 45 °C
 | Live charging power | `abs(Voltage1 × Current)` watts |
 | Energy delivered | Power integrated every second: `energyWh += watts / 3600` |
 | Station 1 power | `abs(Current × Voltage2)` watts |
-| Bay occupied | Slot reading between `0` and `40` cm |
+| Bay occupied / robot detected | Slot reading between `1` and `40` cm |
 
 ### Thermal thresholds
 
 | Constant | Value | Effect |
 | --- | --- | --- |
-| `SAFE_TEMP` | 60 °C | Pump and fan release at or below this (hysteresis point) |
-| `WARN_TEMP` | 65 °C | Pump + fan engage, heating force-cut to 0 %, fast charging downgraded |
-| `CRITICAL_TEMP` | 70 °C | Charging paused automatically; all mode buttons disabled |
+| Fan-off threshold | 27 °C | Automatic fan releases at or below this hysteresis point |
+| `WARN_TEMP` | 30 °C | Automatic fan engages |
+| `CRITICAL_TEMP` | 40 °C | Critical-temperature alert |
 | `LOW_SOC_THRESHOLD` | 15 % | Low-battery alert with nearest-station shortcuts |
 | `HEAT_SAFETY_THRESHOLD` | 65 % heat | Proactively engages cooling before the battery gets hot |
 
@@ -331,8 +347,8 @@ diagnosis.
 | Alert | Rule | Severity |
 | --- | --- | --- |
 | Low battery | SOC ≤ 15 % | High |
-| Battery overheated | Temp ≥ 65 °C | High |
-| Critically overheated | Temp ≥ 70 °C | High |
+| Battery overheated | Temp ≥ 30 °C | High |
+| Critically overheated | Temp ≥ 40 °C | High |
 | Heating level too high | `Heat` ≥ 65 % | High |
 | Repeated overheat | ≥ 3 overheat events in 15 min | High |
 | Frequent cooling | ≥ 3 pump activations in 15 min | Medium |
@@ -648,6 +664,9 @@ statistics:
 | Station voltage | `Voltage2` |
 | Current | Live pack current |
 
+At 100% SOC, charging stops automatically and a prominent **Vehicle Full — 100%
+Charged** message replaces the active/standby status.
+
 **Safety checks.** Battery connected, Temperature safe, Station confirmed — each green
 when satisfied.
 
@@ -670,7 +689,7 @@ charging resumes automatically once the battery cools.
 
 | Card | States |
 | --- | --- |
-| Temperature Status | `NORMAL` / `WARNING` (≥ 65 °C) / `CRITICAL` (≥ 70 °C) |
+| Temperature Status | `NORMAL` / `WARNING` (≥ 30 °C) / `CRITICAL` (≥ 40 °C) |
 | Coolant Pump (Relay1) | `ON` (coolant flow active) / `OFF` |
 | Cooling Fan (Relay2) | `ON` (extracting heat) / `OFF` |
 | Charging Status | `ACTIVE` / `NORMAL ONLY` / `PAUSED` |
@@ -679,9 +698,9 @@ charging resumes automatically once the battery cools.
 **Cooling Control (Liquid Cooling).** Shows the warning and critical thresholds and a
 system summary of pump, fan, heater pad and temperature sensor.
 
-- **Automatic** (default) — the app switches **both** `Relay1` and `Relay2` to 1 at
-  65 °C or when the heating level reaches 65 %, and back to 0 once the battery is at
-  60 °C *and* heat is below 65 %.
+- **Automatic fan** — the dashboard Heat % control raises `Temp` at a proportional
+  rate. At 30 °C the app forces `Heat = 0` and switches fan `Relay2` to 1. While ON,
+  temperature falls by 0.5 °C/s and cannot increase; the fan releases at 27 °C.
 - **Manual** — enables **Turn cooling ON / OFF** (both relays together) plus individual
   **Pump (Relay1)** and **Fan (Relay2)** toggles.
 
@@ -689,9 +708,8 @@ system summary of pump, fan, heater pad and temperature sensor.
 plus **Turn heater ON** (sets 40 %) and **Turn heater OFF**. It exists to raise battery
 temperature deliberately so the thermal-safety chain can be demonstrated.
 
-The heater is **locked OFF and the slider disabled** whenever the battery is at or above
-65 °C — the safety cut-off overrides any manual setting, including one applied from
-another client.
+The slider is the temperature-increase control. **Turn heater OFF** stops additional
+heating; automatic fan cooling takes priority whenever the limit is reached.
 
 **Thermal loop diagram.** A live schematic of the sensor, heater pad, battery pack,
 coolant pipes, and pump + fan, animating with the real relay states, heat level, and
@@ -740,19 +758,16 @@ A complete demo run, start to finish:
    traces the route you programmed. **Stop route** cancels early.
 6. **Edit and delete.** Reopen the route with **Edit**, change a timing, **Update
    route** — same id, updated in place. **Delete** removes it.
-7. **Open Stations**, pick an available one, **Reserve**, choose your saved route, then
-   **Confirm & Play** — Drive Control opens and the route runs. When the last step ends,
-   the vehicle is marked arrived.
-8. **On arrival**, click **Start Wireless Charging** on the side panel, then open the
-   Charging screen to see the same vehicle route-position map alongside the session.
-9. **Watch the session** — mode, SOC, session timer, live power, energy delivered.
-10. **Demonstrate thermal safety** — open Thermal Control and raise the Heat % slider.
-    As the battery warms:
-    - at **65 %** heat, pump and fan engage proactively;
-    - at **65 °C**, heating is force-cut, pump + fan engage, fast charging downgrades,
-      and an overheat alert appears;
-    - at **70 °C**, charging pauses automatically;
-    - as it cools back to **60 °C**, both relays release.
+7. **Open Stations** and reserve an available station. The controller handshake starts
+   the selected station path.
+8. **Approach the reserved station.** When its `SlotN` ultrasonic sensor detects the
+   robot at a valid distance below 20 cm, the dashboard stops it, requests the relay, and waits for relay
+   ON feedback before calculating charging.
+9. **Watch the session** — mode, SOC, session timer, live power and energy delivered.
+   At 100% it stops and displays **Vehicle Full**.
+10. **Demonstrate thermal automation** — raise **Heat %** on Thermal Control. Temperature
+    rises according to the selected level. At **30 °C**, Heat turns OFF and the fan turns
+    ON automatically. Temperature cools by 0.5 °C/s, and the fan turns OFF at **27 °C**.
 11. **Review Health & Alerts** — the alert table shows every rule that fired and the
     event log gives the timestamped story of the whole run.
 
@@ -927,9 +942,9 @@ project root. Both commands open a browser to authenticate.
 | Scrolling over the 3D view zooms instead of scrolling the page | That is the 3D viewport taking the wheel gesture. Move the pointer off the scene to scroll the page. |
 | Lost the vehicle in the 3D view | Press **Reset view** to restore the default angle and distance. |
 | A route keeps driving after you leave | It shouldn't — leaving the screen writes `S`. If the vehicle keeps moving, the controller is not reading `direction`; check the firmware's subscription. |
-| Cooling buttons are greyed out | You are in **Automatic** mode. Switch to **Manual** on the Thermal screen or in the Overview alert card. |
-| Heating slider is disabled | Battery is at or above 65 °C — the safety cut-off has locked it. Let the pack cool. |
-| Fast charging is disabled | Coil not aligned yet, or temperature at/above 65 °C. |
+| Fan turns back ON after manual OFF | Temperature is still at or above 30 °C; automatic protection re-enables it. |
+| Temperature does not rise | Set Heat above 0%. Heating is intentionally blocked while the automatic fan is ON. |
+| Fast charging is disabled | Coil alignment has not yet been confirmed. |
 | Vite refuses to start | Node version too old. Vite 8 needs Node 20.19+ or 22.12+. |
 
 ---
@@ -947,8 +962,9 @@ Known constraints, stated plainly:
 - **Auto-route timing is open-loop.** Steps are held for wall-clock seconds; there is no
   odometry, encoder or GPS feedback confirming the vehicle actually travelled that far.
   The GPS distance and bearing readouts *are* real.
-- **Arrival detection is not sensor-driven.** The vehicle is marked arrived when the
-  auto route's last step finishes, not by a physical arrival sensor.
+- **Auto-charging arrival is sensor-driven.** It depends on the reserved station's
+  `SlotN` ultrasonic reading being greater than 0 and below 20 cm; tune and validate
+  the physical sensor before production use.
 - **The 3D view is an illustration, not a digital twin.** It integrates the live
   `direction` command over time with fixed speed and turn rates, so it shows what the
   vehicle was *told* to do — not surveyed position. The map is scaled to the 120 × 160 cm
