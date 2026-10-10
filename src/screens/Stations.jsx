@@ -101,13 +101,13 @@ export default function Stations() {
         <button
           type="button"
           className="btn btn-outline"
-          disabled={busyAction != null || controllerReady}
+          disabled={busyAction != null}
           onClick={initializePath}
         >
-          {controllerReady
-            ? 'Initialized'
-            : busyAction?.type === 'initialize'
-              ? 'Waiting for Ready…'
+          {busyAction?.type === 'initialize'
+            ? 'Waiting for Ready…'
+            : controllerReady
+              ? 'Initialize Again'
               : 'Initialize Controller'}
         </button>
       </div>
@@ -192,7 +192,13 @@ export default function Stations() {
                 <StationReadout
                   icon={<span className="station-iot-dot" />}
                   label="Station feed"
-                  value={state.stationDataLoaded && state.connectivity.online ? 'LIVE' : 'WAITING'}
+                  value={
+                    state.stationDataLoaded && state.connectivity.online
+                      ? station.electricalPredicted
+                        ? 'PREDICTED'
+                        : 'LIVE'
+                      : 'WAITING'
+                  }
                   active={state.stationDataLoaded && state.connectivity.online}
                 />
                 <StationReadout

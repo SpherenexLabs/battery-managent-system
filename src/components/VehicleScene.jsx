@@ -75,6 +75,10 @@ function VehicleFallback2D({ state, mode, height }) {
               <span className="scene2d-pad">⚡</span>
               <strong>S{station.id}</strong>
               <small>{relayOn ? 'CHARGING' : station.indicatorEngaged ? 'ENGAGED' : 'READY'}</small>
+              <small className="scene2d-electrical">
+                {station.voltage.toFixed(2)} V · {station.current.toFixed(2)} A · {station.power.toFixed(1)} W
+              </small>
+              {station.electricalPredicted && <small>ESTIMATED VALUES</small>}
               {charging && selected && <i className="scene2d-energy-ring ring-one" />}
               {charging && selected && <i className="scene2d-energy-ring ring-two" />}
             </div>
@@ -151,7 +155,7 @@ function makeVehicle() {
 
 function makeVoltageLabel(stationId) {
   const canvas = document.createElement('canvas');
-  canvas.width = 384;
+  canvas.width = 640;
   canvas.height = 112;
   const context = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
@@ -161,28 +165,35 @@ function makeVoltageLabel(stationId) {
     new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
   );
   sprite.position.set(0, 4.3, 0);
-  sprite.scale.set(3.8, 1.12, 1);
+  sprite.scale.set(5.8, 1.12, 1);
   sprite.renderOrder = 20;
   sprite.userData = { canvas, context, texture, stationId, lastText: null };
   updateVoltageLabel(sprite, null);
   return sprite;
 }
 
-function updateVoltageLabel(sprite, voltage) {
+function updateVoltageLabel(sprite, stationState) {
   const { canvas, context, texture, stationId } = sprite.userData;
-  const text = Number.isFinite(voltage) ? `S${stationId}   ${voltage.toFixed(2)} V` : `S${stationId}   — V`;
+  const voltage = Number(stationState?.voltage);
+  const current = Number(stationState?.current);
+  const power = Number(stationState?.power);
+  const hasElectrical =
+    Number.isFinite(voltage) && Number.isFinite(current) && Number.isFinite(power);
+  const text = hasElectrical
+    ? `S${stationId}   ${voltage.toFixed(2)} V   ${current.toFixed(2)} A   ${power.toFixed(1)} W${stationState.electricalPredicted ? '   EST' : ''}`
+    : `S${stationId}   waiting for electrical data`;
   if (sprite.userData.lastText === text) return;
   sprite.userData.lastText = text;
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = 'rgba(7, 18, 32, 0.94)';
-  context.strokeStyle = Number.isFinite(voltage) ? '#5eead4' : '#64748b';
+  context.strokeStyle = hasElectrical ? '#5eead4' : '#64748b';
   context.lineWidth = 5;
   context.beginPath();
   context.roundRect(7, 7, canvas.width - 14, canvas.height - 14, 24);
   context.fill();
   context.stroke();
   context.fillStyle = '#f8fafc';
-  context.font = '700 42px system-ui, sans-serif';
+  context.font = '700 32px system-ui, sans-serif';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
@@ -651,7 +662,7 @@ export default function VehicleScene({ mode = 'drive', height = 320 }) {
 
         const voltage = Math.max(0, Number(stationState?.voltage) || 0);
         const voltageLevel = Math.min(1, voltage / 15);
-        updateVoltageLabel(station.userData.voltageLabel, stationState?.voltage);
+        updateVoltageLabel(station.userData.voltageLabel, stationState);
         station.userData.voltageBeam.material.color.setHex(engaged ? COLORS.danger : COLORS.ok);
         station.userData.voltageBeam.material.opacity = voltage > 0 ? 0.1 + voltageLevel * (0.25 + 0.15 * pulse) : 0.035;
         station.userData.voltageBeam.scale.y = 0.3 + voltageLevel * 1.25;

@@ -59,7 +59,7 @@ export function getChargingPower(state) {
   const vehicleCurrent = Number(state.current);
   const measuredPower = Math.abs(vehicleVoltage * vehicleCurrent);
   if (vehicleVoltage > 0 && Math.abs(vehicleCurrent) > 0.01 && measuredPower > 0) {
-    return { watts: measuredPower, source: 'bms' };
+    return { watts: measuredPower, voltage: vehicleVoltage, current: Math.abs(vehicleCurrent), source: 'bms' };
   }
 
   const stationIndex = Number.isInteger(state.selectedStationId)
@@ -69,10 +69,10 @@ export function getChargingPower(state) {
   const stationCurrent = Number(state.stationCurrents?.[stationIndex]);
   const stationPower = Math.abs(stationVoltage * stationCurrent);
   if (stationVoltage > 0 && Math.abs(stationCurrent) > 0.01 && stationPower > 0) {
-    return { watts: stationPower, source: 'station' };
+    return { watts: stationPower, voltage: stationVoltage, current: Math.abs(stationCurrent), source: 'station' };
   }
 
-  if (!state.charging?.active) return { watts: 0, source: 'idle' };
+  if (!state.charging?.active) return { watts: 0, voltage: null, current: null, source: 'idle' };
 
   // When the prototype publishes zero current, provide a transparent estimate
   // instead of freezing power and delivered energy at zero. The estimate uses
@@ -86,8 +86,14 @@ export function getChargingPower(state) {
   const soc = Number.isFinite(state.soc) ? state.soc : 0;
   const socTaper = soc > 80 ? Math.max(0.35, (100 - soc) / 20) : 1;
   const temperatureFactor = Number(state.temperature) >= CRITICAL_TEMP ? 0.8 : 1;
-  const predictedPower = estimatedVoltage * baseCurrent * socTaper * temperatureFactor;
-  return { watts: predictedPower, source: 'predicted' };
+  const predictedCurrent = baseCurrent * socTaper * temperatureFactor;
+  const predictedPower = estimatedVoltage * predictedCurrent;
+  return {
+    watts: predictedPower,
+    voltage: estimatedVoltage,
+    current: predictedCurrent,
+    source: 'predicted',
+  };
 }
 
 export function isChargingCoolingActive(charging, now = Date.now()) {
@@ -137,6 +143,7 @@ function startPlayback(steps, { kind, routeId = null, label }) {
 }
 
 const round1 = (v) => Math.round(v * 10) / 10;
+const round2 = (v) => Math.round(v * 100) / 100;
 const pushLog = (log, text) => [{ time: Date.now(), text }, ...log].slice(0, 30);
 const trimByWindow = (list, now) => list.filter((t) => now - t <= HISTORY_WINDOW_MS);
 
@@ -211,6 +218,59 @@ function chargingArrivalStationId(slots) {
   return index >= 0 ? index + 1 : null;
 }
 
+// Use real non-zero station telemetry whenever it exists. Zero/missing values
+// mean the prototype sensor is unavailable, so provide small deterministic
+// fluctuations for the cards, graph, and animation instead of a wall of zeros.
+function stationElectricalAt(state, index, timeMs = state.clock?.getTime?.() ?? Date.now()) {
+  const reportedVoltage = Number(state.stationVoltages[index]);
+  const reportedCurrent = Number(state.stationCurrents[index]);
+  const hasVoltage = Number.isFinite(reportedVoltage) && reportedVoltage > 0.05;
+  const hasCurrent = Number.isFinite(reportedCurrent) && Math.abs(reportedCurrent) > 0.01;
+  const stationId = index + 1;
+  const selected = state.selectedStationId === stationId;
+  const chargingHere = selected && state.charging.active;
+  const phase = timeMs / 1050 + index * 1.73;
+  const predictedVoltage = round2(
+    (chargingHere ? 5.18 : 4.92 + index * 0.06) +
+      Math.sin(phase) * (chargingHere ? 0.09 : 0.06)
+  );
+  const predictedCurrent = round2(
+    Math.max(
+      0.08,
+      (chargingHere ? 1.18 : selected ? 0.34 : 0.2 + index * 0.025) +
+        Math.sin(phase * 1.37 + 0.8) * (chargingHere ? 0.11 : 0.035)
+    )
+  );
+  const voltage = hasVoltage ? reportedVoltage : predictedVoltage;
+  const current = hasCurrent ? Math.abs(reportedCurrent) : predictedCurrent;
+  return {
+    voltage,
+    current,
+    power: round2(voltage * current),
+    predicted: !hasVoltage || !hasCurrent,
+  };
+}
+
+function stationDisplayHistory(state, index, electrical) {
+  const reportedHistory = state.stationHistory[index] || [];
+  if (!electrical.predicted) return reportedHistory;
+  const usableHistory = reportedHistory.filter(
+    (sample) => Number(sample.voltage) > 0.05 && Math.abs(Number(sample.current)) > 0.01
+  );
+  if (usableHistory.length >= 2) return usableHistory;
+  const now = state.clock?.getTime?.() ?? Date.now();
+  return Array.from({ length: 12 }, (_, sampleIndex) => {
+    const t = now - (11 - sampleIndex) * 1000;
+    const sample = stationElectricalAt(state, index, t);
+    return {
+      t,
+      voltage: sample.voltage,
+      current: sample.current,
+      predicted: true,
+    };
+  });
+}
+
 function computeStations(state) {
   return STATIONS_BASE.map((base, i) => {
     const reportedLocation = state.stationLocations[i];
@@ -249,9 +309,8 @@ function computeStations(state) {
       ? distanceKm(state.vehicleLocation.lat, state.vehicleLocation.lng, location.lat, location.lng)
       : null;
     const name = state.stationNames[i] ?? (hasVehicleLocation ? nearbyStationName(i, location) : base.name);
-    const current = state.stationCurrents[i];
-    const voltage = state.stationVoltages[i];
-    const power = current != null && voltage != null ? round1(Math.abs(current * voltage)) : null;
+    const electrical = stationElectricalAt(state, i);
+    const { current, voltage, power } = electrical;
     return {
       ...base,
       ...location,
@@ -265,12 +324,13 @@ function computeStations(state) {
       current,
       voltage,
       power,
+      electricalPredicted: electrical.predicted,
       switchValue,
       relayValue,
       switchEngaged,
       ultrasonicEngaged,
       indicatorEngaged,
-      history: state.stationHistory[i],
+      history: stationDisplayHistory(state, i, electrical),
       locationSource: reportedLocation != null ? 'iot' : hasVehicleLocation ? 'prototype' : 'default',
     };
   });
@@ -589,6 +649,27 @@ function reducerInner(state, action) {
         eventLog = pushLog(eventLog, 'Battery fully charged (100% SOC) — charging session complete.');
       }
 
+      const stationHistory = state.stationHistory.map((history, index) => {
+        const electrical = stationElectricalAt(
+          { ...state, clock, charging, soc, temperature },
+          index,
+          clock.getTime()
+        );
+        if (!electrical.predicted) return history;
+        const usableHistory = history.filter(
+          (sample) => Number(sample.voltage) > 0.05 && Math.abs(Number(sample.current)) > 0.01
+        );
+        return [
+          ...usableHistory,
+          {
+            t: clock.getTime(),
+            voltage: electrical.voltage,
+            current: electrical.current,
+            predicted: true,
+          },
+        ].slice(-STATION_HISTORY_MAX_SAMPLES);
+      });
+
       return withAlertTimestamps({
         ...state,
         clock,
@@ -600,6 +681,7 @@ function reducerInner(state, action) {
         temperatureFanActive,
         movementFanCycleActive: false,
         movementFanCycleSecond: 0,
+        stationHistory,
         charging,
         eventLog,
       });

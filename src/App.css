@@ -2884,6 +2884,13 @@
   font-weight: 700;
 }
 
+.scene2d-station .scene2d-electrical {
+  margin-top: 2px;
+  color: #5eead4;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .scene2d-car {
   z-index: 5;
   display: grid;

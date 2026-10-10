@@ -28,6 +28,8 @@ export default function Charging() {
   const chargePct = state.soc ?? 0;
   const chargingPower = getChargingPower(state);
   const livePower = chargingPower.watts;
+  const displayedVoltage = chargingPower.voltage ?? state.voltage;
+  const displayedCurrent = chargingPower.current ?? state.current;
   const powerLabel =
     chargingPower.source === 'predicted'
       ? 'Predicted charging power'
@@ -128,8 +130,8 @@ export default function Charging() {
               <SessionStat label={powerLabel} value={`${livePower.toFixed(1)} W`} />
               <SessionStat label={energyLabel} value={`${energyDeliveredWh.toFixed(3)} Wh`} />
               <SessionStat label="BMS SOC" value={state.soc != null ? `${Math.round(state.soc)}% live` : 'Waiting'} />
-              <SessionStat label="Vehicle voltage" value={state.voltage != null ? `${state.voltage.toFixed(2)} V` : '—'} />
-              <SessionStat label="Current" value={state.current != null ? `${state.current.toFixed(2)} A` : '—'} />
+              <SessionStat label="Charging voltage" value={displayedVoltage != null ? `${displayedVoltage.toFixed(2)} V` : '—'} />
+              <SessionStat label="Charging current" value={displayedCurrent != null ? `${displayedCurrent.toFixed(2)} A` : '—'} />
             </div>
           </div>
 
