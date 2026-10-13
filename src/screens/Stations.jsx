@@ -1,311 +1,372 @@
 import { useState } from 'react';
-import { useEvDispatch, useEvState } from '../state/store.js';
-import { PageHeader, InfoNote, StatusDot } from '../components/ui.jsx';
+import { routeTotalSeconds, useEvDispatch, useEvState } from '../state/store.js';
+import { PageHeader, InfoNote, StatusDot, Card } from '../components/ui.jsx';
 import { IconBolt, IconCheck, IconPulse, IconStation, IconTarget } from '../components/icons.jsx';
-import {
-  initializeStationPath,
-  releaseStationReservation,
-  reserveStationPath,
-  STATION_PATH_NAME,
-} from '../state/bms.js';
-import Scene3D from '../components/Scene3D.jsx';
+import { setStationOccupied } from '../state/bms.js';
+import { bearingDeg, compassLabel, distanceKm } from '../utils/geo.js';
 
 const STATION_META = {
-  available: { label: 'Ready', color: 'green' },
+  available: { label: 'Available', color: 'green' },
   occupied: { label: 'Occupied', color: 'red' },
-  engaged: { label: 'Engaged', color: 'red' },
-  reserved: { label: 'Vehicle en route', color: 'blue' },
-  connecting: { label: 'Starting charge', color: 'teal' },
+  reserved: { label: 'Reserved', color: 'blue' },
   charging: { label: 'Charging', color: 'teal' },
 };
+
+// Random station-to-station distances (km), picked once per page load. The
+// table is symmetric, so A → B always matches B → A.
+const STATION_DISTANCES = (() => {
+  const table = {};
+  for (let a = 1; a <= 4; a++) {
+    for (let b = a + 1; b <= 4; b++) {
+      const km = Math.round((1 + Math.random() * 7) * 10) / 10; // 1.0 – 8.0 km
+      table[`${a}-${b}`] = km;
+      table[`${b}-${a}`] = km;
+    }
+  }
+  return table;
+})();
+
+function stationDirection(vehicleLocation, station) {
+  if (vehicleLocation.lat == null || vehicleLocation.lng == null) return null;
+  const km = distanceKm(vehicleLocation.lat, vehicleLocation.lng, station.lat, station.lng);
+  const compass = compassLabel(bearingDeg(vehicleLocation.lat, vehicleLocation.lng, station.lat, station.lng));
+  return { km, compass };
+}
 
 export default function Stations() {
   const state = useEvState();
   const dispatch = useEvDispatch();
-  const [busyAction, setBusyAction] = useState(null);
-  const [error, setError] = useState('');
-  const controllerReady = state.executePathStatus?.trim().toLowerCase() === 'ready';
+  const selected = state.stations.find((s) => s.id === state.selectedStationId);
+  const reservationLocked = state.reservationStatus === 'confirmed';
+  const canReserveNavigate = !reservationLocked;
+  const chosenRoute = state.routes.find((r) => r.id === state.selectedRouteId) ?? null;
+  const [isFetchingLocation, setIsFetchingLocation] = useState(false);
 
-  async function initializePath() {
-    if (busyAction != null) return;
-    setBusyAction({ type: 'initialize' });
-    setError('');
-    try {
-      await initializeStationPath();
-    } catch (requestError) {
-      setError(requestError?.message || 'Firebase did not accept Execute_Path = 1.');
-    } finally {
-      setBusyAction(null);
-    }
+  function toggleSimulator(station) {
+    setStationOccupied(station.id, station.filledSlots === 0);
   }
 
-  async function reserveAndGo(station) {
-    if (busyAction != null || station.status !== 'available') return;
-    setBusyAction({ id: station.id, type: 'reserve' });
-    setError('');
-    try {
-      // A path command cannot run until the controller has completed its
-      // one-time Execute_Path handshake. Reserve performs it automatically
-      // only when needed; all later stations reuse the same Ready state.
-      if (!controllerReady) await initializeStationPath();
-      const pathName = await reserveStationPath(station.id);
-      dispatch({ type: 'RESERVE_STATION', id: station.id, pathName });
-    } catch (requestError) {
-      setError(requestError?.message || 'Firebase did not accept the station Path_Name.');
-    } finally {
-      setBusyAction(null);
-    }
+  function openDirections(station) {
+    if (state.vehicleLocation.lat == null || state.vehicleLocation.lng == null) return;
+    const origin = `${state.vehicleLocation.lat},${state.vehicleLocation.lng}`;
+    const destination = `${station.lat},${station.lng}`;
+    window.open(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`, '_blank', 'noopener,noreferrer');
   }
 
-  async function retryPath(station) {
-    if (busyAction != null) return;
-    setBusyAction({ id: station.id, type: 'retry' });
-    setError('');
-    try {
-      if (!controllerReady) await initializeStationPath();
-      await reserveStationPath(station.id);
-      dispatch({ type: 'RETRY_STATION_PATH', id: station.id });
-    } catch (requestError) {
-      setError(requestError?.message || 'Firebase did not accept the station Path_Name again.');
-    } finally {
-      setBusyAction(null);
+  function refreshCurrentLocation() {
+    if (!navigator.geolocation) {
+      dispatch({ type: 'SET_VEHICLE_LOCATION_ERROR', error: 'Geolocation is not supported by this browser.' });
+      return;
     }
-  }
-
-  async function cancelReservation(station) {
-    if (busyAction != null) return;
-    setBusyAction({ id: station.id, type: 'cancel' });
-    setError('');
-    try {
-      await releaseStationReservation();
-      dispatch({ type: 'CANCEL_STATION_RESERVATION' });
-    } catch (requestError) {
-      setError(requestError?.message || 'Could not release the station reservation.');
-    } finally {
-      setBusyAction(null);
-    }
+    setIsFetchingLocation(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        dispatch({ type: 'SET_VEHICLE_LOCATION', lat: position.coords.latitude, lng: position.coords.longitude });
+        setIsFetchingLocation(false);
+      },
+      (error) => {
+        dispatch({ type: 'SET_VEHICLE_LOCATION_ERROR', error: error.message });
+        setIsFetchingLocation(false);
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+    );
   }
 
   return (
-    <div className="screen stations-screen">
-      <PageHeader
-        title="4 Live Charging Stations"
-        subtitle="Initialize once, then reserve any station. Reserve also completes initialization automatically when needed."
-      />
+    <div className={`screen screen-split stations-screen ${selected ? 'has-station-selection' : 'no-station-selection'}`}>
+      <div className="screen-main">
+        <PageHeader title="4 Nearby Charging Stations" subtitle="Sorted by live distance from your current vehicle location, with real-time availability and directions." />
 
-      <div className="station-initialize-bar">
-        <div>
-          <strong>Controller initialization</strong>
-          <span>{controllerReady ? 'Execute_Path is Ready' : 'Optional: send Execute_Path = 1'}</span>
-        </div>
-        <button
-          type="button"
-          className="btn btn-outline"
-          disabled={busyAction != null}
-          onClick={initializePath}
-        >
-          {busyAction?.type === 'initialize'
-            ? 'Waiting for Ready…'
-            : controllerReady
-              ? 'Initialize Again'
-              : 'Initialize Controller'}
-        </button>
-      </div>
-
-      {error && (
-        <InfoNote tone="warning" title="Station command failed">
-          {error}
+        <InfoNote title="Wireless charging station setup">
+          Every station monitors its charging bay through the IoT link. Reserve an available station and the vehicle
+          will begin automatic navigation to its wireless charging transmitter.
         </InfoNote>
-      )}
 
-      <Scene3D
-        title="Live Four-Station Map"
-        hint="Green means ready. Red means the switch is engaged or that station's ultrasonic reading is below 20 cm."
-        mode="stations"
-        height={390}
-      />
+        <div className="station-location-bar">
+          <div>
+            <span className={state.vehicleLocation.lat != null ? 'text-ok' : 'text-warn'}>
+            {state.vehicleLocation.lat != null
+                ? `Vehicle current location: ${state.vehicleLocation.lat.toFixed(5)}, ${state.vehicleLocation.lng.toFixed(5)}`
+                : 'Waiting for browser GPS location'}
+            </span>
+            <span className="muted small station-location-help">
+              {state.vehicleLocation.lat != null
+                ? 'Live browser GPS is used to calculate station distance and directions.'
+                : 'Allow location access to calculate nearby-station distance and navigation.'}
+            </span>
+          </div>
+          <button type="button" className="btn btn-outline" disabled={isFetchingLocation} onClick={refreshCurrentLocation}>
+            {isFetchingLocation ? 'Fetching location...' : 'Refresh Current Location'}
+          </button>
+        </div>
 
-      <div className="station-grid">
-        {state.stations.map((station) => {
-          const meta = STATION_META[station.status] || STATION_META.available;
-          const isSelected = station.id === state.selectedStationId;
-          const isReserving = busyAction?.id === station.id && busyAction.type === 'reserve';
-          const isRetrying = busyAction?.id === station.id && busyAction.type === 'retry';
-          const isCancelling = busyAction?.id === station.id && busyAction.type === 'cancel';
-          const isActiveReservation =
-            isSelected && state.reservationStatus === 'confirmed';
-          const canReserve =
-            station.status === 'available' &&
-            state.reservationStatus !== 'confirmed' &&
-            busyAction == null;
-          return (
-            <article
-              key={station.id}
-              className={`station-card ${isSelected ? 'selected' : ''} ${station.indicatorEngaged ? 'station-engaged' : 'station-ready'}`}
-            >
-              {isSelected && (
-                <span className="station-card-check" aria-label="Selected station">
-                  <IconCheck />
-                </span>
-              )}
-
-              <div className="station-card-head">
-                <strong>{station.name}</strong>
-                <StatusDot color={meta.color} label={meta.label} />
-              </div>
-
-              <div className="station-card-art">
-                <IconStation width="48" height="48" />
-                <span className={`station-switch-lamp ${station.indicatorEngaged ? 'engaged' : 'ready'}`}>
-                  {station.ultrasonicEngaged
-                    ? 'RED · ULTRA < 20 CM'
-                    : station.switchValue == null
-                      ? 'Switch —'
-                      : station.switchEngaged
-                        ? 'RED · ENGAGED'
-                        : 'GREEN · READY'}
-                </span>
-              </div>
-
-              <div className="station-slot-summary" aria-label={`${station.name} slot and path data`}>
-                <span><strong>{station.slotValue > 0 ? `${station.slotValue.toFixed(1)} cm` : 'NO ECHO'}</strong> vehicle distance</span>
-                <span><strong>{station.availableSlots}</strong> available</span>
-                <span><strong>{STATION_PATH_NAME[station.id]}</strong> controller path</span>
-              </div>
-
-              <div className="station-electrical" aria-label={`${station.name} electrical readings`}>
-                <StationReadout icon={<IconPulse />} label="Current" value={formatReading(station.current, 'A')} active={station.current != null} />
-                <StationReadout icon={<IconBolt />} label="Voltage" value={formatReading(station.voltage, 'V')} active={station.voltage != null} />
-                <StationReadout icon={<IconBolt />} label="Power" value={formatReading(station.power, 'W', 1)} active={station.power != null} />
-              </div>
-
-              <StationGraph history={station.history} stationId={station.id} />
-
-              <div className="station-live-details">
-                <StationReadout
-                  icon={<IconTarget />}
-                  label="Physical switch"
-                  value={station.switchValue == null ? 'NO DATA' : station.switchEngaged ? '1 · ENGAGED' : '0 · READY'}
-                  active={station.switchValue != null}
-                  danger={station.switchEngaged}
-                />
-                <StationReadout
-                  icon={<span className="station-iot-dot" />}
-                  label="Station feed"
-                  value={
-                    state.stationDataLoaded && state.connectivity.online
-                      ? station.electricalPredicted
-                        ? 'PREDICTED'
-                        : 'LIVE'
-                      : 'WAITING'
-                  }
-                  active={state.stationDataLoaded && state.connectivity.online}
-                />
-                <StationReadout
-                  icon={<IconBolt />}
-                  label="Charging relay"
-                  value={station.relayValue == null ? 'NO DATA' : station.relayValue ? '1 · ON' : '0 · OFF'}
-                  active={station.relayValue === 1}
-                />
-              </div>
-
-              <div className="station-actions">
-                {isActiveReservation ? (
-                  <>
+        <div className="station-grid">
+          {state.stations.map((s) => {
+            const meta = STATION_META[s.status];
+            const isSelected = s.id === state.selectedStationId;
+            const dir = stationDirection(state.vehicleLocation, s);
+            return (
+              <div key={s.id} className={`station-card ${isSelected ? 'selected' : ''}`}>
+                {isSelected && (
+                  <span className="station-card-check">
+                    <IconCheck />
+                  </span>
+                )}
+                <div className="station-card-head">
+                  <strong>{s.name}</strong>
+                  <StatusDot color={meta.color} label={meta.label} />
+                </div>
+                <div className="station-card-art">
+                  <IconStation width="48" height="48" />
+                </div>
+                <p className="muted small">
+                  {dir ? `${dir.km.toFixed(2)} km · ${dir.compass}` : 'Waiting for location…'}
+                </p>
+                <div className="station-slot-summary" aria-label={`${s.name} slot availability`}>
+                  <span><strong>{s.availableSlots}</strong> available</span>
+                  <span><strong>{s.filledSlots}</strong> filled</span>
+                  <span><strong>{s.totalSlots}</strong> total slots</span>
+                </div>
+                <div className="station-electrical" aria-label={`${s.name} electrical readings`}>
+                  <StationReadout icon={<IconPulse />} label="Current" value={s.current != null ? `${s.current.toFixed(2)} A` : '—'} active={s.current != null} />
+                  <StationReadout icon={<IconBolt />} label="Voltage" value={s.voltage != null ? `${s.voltage.toFixed(2)} V` : '—'} active={s.voltage != null} />
+                  <StationReadout icon={<IconBolt />} label="Power" value={s.power != null ? `${s.power.toFixed(1)} W` : '—'} active={s.power != null} />
+                </div>
+                <div className="station-live-details">
+                  <StationReadout icon={<IconBolt />} label="Transmitter" value={s.status === 'charging' ? 'ACTIVE' : 'STANDBY'} active={s.status === 'charging'} />
+                  <StationReadout icon={<IconTarget />} label="Activation" value={isSelected ? 'ARMED' : 'READY'} active={isSelected} />
+                  <StationReadout icon={<IconCheck />} label="Engagement" value={engagementLabel(state, s)} active={s.status === 'charging'} />
+                  <StationReadout icon={<span className="station-iot-dot" />} label="IoT link" value={state.connectivity.online ? 'LIVE' : 'OFFLINE'} active={state.connectivity.online} />
+                </div>
+                <div className="station-distances" aria-label={`Distance from ${s.name} to other stations`}>
+                  {state.stations
+                    .filter((other) => other.id !== s.id)
+                    .map((other) => (
+                      <div key={other.id} className="station-distances-row">
+                        <span>To {other.name}</span>
+                        <strong>{STATION_DISTANCES[`${s.id}-${other.id}`].toFixed(1)} km</strong>
+                      </div>
+                    ))}
+                </div>
+                <div className="station-actions">
+                  {s.status === 'available' ? (
                     <button
                       type="button"
-                      className="btn btn-accent"
-                      disabled={busyAction != null}
-                      onClick={() => retryPath(station)}
+                      className={isSelected ? 'btn btn-accent' : 'btn btn-outline'}
+                      disabled={!canReserveNavigate}
+                      onClick={() => dispatch({ type: 'SELECT_STATION', id: s.id })}
                     >
-                      {isRetrying ? 'Sending Path…' : `Retry Path ${STATION_PATH_NAME[station.id]}`}
+                      {isSelected ? 'Reserve & Navigate' : 'Reserve'}
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-outline"
-                      disabled={busyAction != null}
-                      onClick={() => cancelReservation(station)}
-                    >
-                      {isCancelling ? 'Cancelling…' : 'Cancel Reservation'}
+                  ) : (
+                    <button type="button" className="btn btn-disabled" disabled>
+                      {meta.label}
                     </button>
-                  </>
-                ) : (
+                  )}
                   <button
                     type="button"
-                    className="btn btn-accent"
-                    disabled={!canReserve}
-                    onClick={() => reserveAndGo(station)}
+                    className="btn btn-outline"
+                    disabled={state.vehicleLocation.lat == null}
+                    onClick={() => openDirections(s)}
                   >
-                    {isReserving ? 'Reserving…' : `Reserve Station ${station.id}`}
+                    Directions
                   </button>
-                )}
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    disabled={!state.connectivity.online}
+                    onClick={() => toggleSimulator(s)}
+                  >
+                    {s.filledSlots > 0 ? 'Simulate Free Slot' : 'Simulate Occupied Slot'}
+                  </button>
+                </div>
               </div>
-            </article>
-          );
-        })}
+            );
+          })}
+        </div>
+
+        <InfoNote title="Reservation confirmed before movement.">
+          Please confirm your reservation. The vehicle will navigate automatically to the selected station.
+        </InfoNote>
+
+        {state.vehicleLocation.error && (
+          <InfoNote tone="warning" title="Location unavailable">
+            {state.vehicleLocation.error} Distance and direction to stations require location access.
+          </InfoNote>
+        )}
+      </div>
+
+      <div className="screen-side">
+        {selected ? (
+          <>
+            <h3 className="side-title">Selected: {selected.name}</h3>
+            <div className="kv-list">
+              <div className="kv-row">
+                <span>
+                  <IconCheck className="kv-icon ok" /> Status
+                </span>
+                <strong className="text-ok">{STATION_META[selected.status].label}</strong>
+              </div>
+              <div className="kv-row">
+                <span>Route</span>
+                <strong>Predefined Track</strong>
+              </div>
+              <div className="kv-row">
+                <span>Live slots</span>
+                <strong>{selected.availableSlots} available / {selected.filledSlots} filled</strong>
+              </div>
+              <div className="kv-row">
+                <span>Engagement</span>
+                <strong>{engagementLabel(state, selected)}</strong>
+              </div>
+              <div className="kv-row">
+                <span>Current / Voltage</span>
+                <strong>
+                  {selected.current != null ? `${selected.current.toFixed(2)} A` : '—'} /{' '}
+                  {selected.voltage != null ? `${selected.voltage.toFixed(2)} V` : '—'}
+                </strong>
+              </div>
+              <div className="kv-row">
+                <span>Power</span>
+                <strong>{selected.power != null ? `${selected.power.toFixed(1)} W` : '—'}</strong>
+              </div>
+              <div className="kv-row">
+                <span>Distance / Direction</span>
+                <strong>
+                  {(() => {
+                    const dir = stationDirection(state.vehicleLocation, selected);
+                    return dir ? `${dir.km.toFixed(2)} km · ${dir.compass}` : '—';
+                  })()}
+                </strong>
+              </div>
+              <button
+                type="button"
+                className="btn btn-outline btn-block"
+                disabled={state.vehicleLocation.lat == null}
+                onClick={() => openDirections(selected)}
+              >
+                Directions in Maps
+              </button>
+              <div className="kv-row">
+                <span>Reservation</span>
+                <strong className={state.reservationStatus === 'confirmed' ? 'text-ok' : 'text-warn'}>
+                  {state.reservationStatus === 'confirmed' ? 'Confirmed' : 'Pending'}
+                </strong>
+              </div>
+            </div>
+
+            <h3 className="side-title">Auto route to drive</h3>
+            {!state.routesLoaded ? (
+              <p className="muted small">Loading saved routes…</p>
+            ) : state.routes.length === 0 ? (
+              <InfoNote tone="warning" title="No saved routes yet">
+                The vehicle only drives directions you have saved. Create a route on the Drive Control screen,
+                then come back to reserve.
+                <button
+                  type="button"
+                  className="btn btn-accent btn-block"
+                  onClick={() => dispatch({ type: 'GO_TO', screen: 'navigation' })}
+                >
+                  Create a route →
+                </button>
+              </InfoNote>
+            ) : (
+              <div className="route-picker">
+                {state.routes.map((route) => (
+                  <label
+                    key={route.id}
+                    className={`route-picker-option ${state.selectedRouteId === route.id ? 'selected' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="reservation-route"
+                      checked={state.selectedRouteId === route.id}
+                      disabled={reservationLocked}
+                      onChange={() => dispatch({ type: 'SELECT_ROUTE', routeId: route.id })}
+                    />
+                    <span className="route-picker-body">
+                      <strong>{route.name}</strong>
+                      <span className="muted small">
+                        {route.steps.length} step{route.steps.length === 1 ? '' : 's'} · {routeTotalSeconds(route)}s total
+                      </span>
+                      <span className="route-chip-row">
+                        {route.steps.map((step, i) => (
+                          <span key={`${route.id}-${i}`} className="route-chip">
+                            {step.direction} {step.seconds}s
+                          </span>
+                        ))}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <InfoNote title="Reservation Confirmed Before Movement">
+              A reservation must be confirmed before the vehicle moves. Confirming locks {selected.name} and
+              immediately plays the auto route you picked — each direction is sent for its saved duration.
+            </InfoNote>
+
+            <ol className="step-list">
+              <li className="done">
+                <span className="step-num">1</span>
+                <div>
+                  <strong>Select a station</strong>
+                  <p>You selected {selected.name}.</p>
+                </div>
+              </li>
+              <li className={state.selectedRouteId ? 'done' : ''}>
+                <span className="step-num">2</span>
+                <div>
+                  <strong>Choose a saved route</strong>
+                  <p>{chosenRoute ? `Driving "${chosenRoute.name}".` : 'Pick which saved directions to drive.'}</p>
+                </div>
+              </li>
+              <li className={state.reservationStatus === 'confirmed' ? 'done' : ''}>
+                <span className="step-num">3</span>
+                <div>
+                  <strong>Confirm &amp; play</strong>
+                  <p>Confirming locks the station and starts playing the route straight away.</p>
+                </div>
+              </li>
+            </ol>
+
+            <button
+              type="button"
+              className="btn btn-accent btn-block"
+              disabled={reservationLocked || !chosenRoute}
+              onClick={() => dispatch({ type: 'CONFIRM_RESERVATION' })}
+            >
+              {chosenRoute ? `Confirm & Play "${chosenRoute.name}"` : 'Confirm Reservation'}
+            </button>
+            {!chosenRoute && state.routes.length > 0 && (
+              <p className="muted small center">Choose a saved route above to confirm.</p>
+            )}
+          </>
+        ) : (
+          <Card title="No station selected">
+            <p className="muted">Choose an available station to view reservation details.</p>
+          </Card>
+        )}
       </div>
     </div>
   );
 }
 
-function formatReading(value, unit, digits = 2) {
-  return value == null ? '—' : `${value.toFixed(digits)} ${unit}`;
+function engagementLabel(state, station) {
+  if (state.selectedStationId !== station.id) return 'Not engaged';
+  if (state.vehicleStatus === 'charging') return 'Charging engaged';
+  if (state.vehicleStatus === 'arrived') return 'Docking engaged';
+  if (state.vehicleStatus === 'moving') return 'Vehicle en route';
+  return state.reservationStatus === 'pending' ? 'Reservation pending' : 'Reserved';
 }
 
-function StationReadout({ icon, label, value, active, danger = false }) {
+function StationReadout({ icon, label, value, active }) {
   return (
-    <div className={`station-readout ${danger ? 'danger' : ''}`}>
+    <div className="station-readout">
       <span className={active ? 'station-readout-icon active' : 'station-readout-icon'}>{icon}</span>
       <span>{label}</span>
-      <strong className={danger ? 'text-danger' : active ? 'text-ok' : ''}>{value}</strong>
+      <strong className={active ? 'text-ok' : ''}>{value}</strong>
     </div>
   );
-}
-
-function StationGraph({ history = [], stationId }) {
-  const samples = history.slice(-40);
-  const voltage = samples.map((sample) => sample.voltage).filter(Number.isFinite);
-  const current = samples.map((sample) => sample.current).filter(Number.isFinite);
-  const voltagePoints = chartPoints(samples.map((sample) => sample.voltage));
-  const currentPoints = chartPoints(samples.map((sample) => sample.current));
-
-  return (
-    <div className="station-chart" aria-label={`Live voltage and current graph for Station ${stationId}`}>
-      <div className="station-chart-head">
-        <strong>Live electrical graph</strong>
-        <span><i className="voltage-line" /> Voltage</span>
-        <span><i className="current-line" /> Current</span>
-      </div>
-      {samples.length === 0 ? (
-        <div className="station-chart-empty">Waiting for BMS station readings…</div>
-      ) : (
-        <svg viewBox="0 0 320 92" role="img" aria-label="Recent station voltage and current samples" preserveAspectRatio="none">
-          {[18, 46, 74].map((y) => <line key={y} x1="0" y1={y} x2="320" y2={y} className="chart-grid-line" />)}
-          {voltagePoints && <polyline points={voltagePoints} className="chart-line chart-voltage" />}
-          {currentPoints && <polyline points={currentPoints} className="chart-line chart-current" />}
-        </svg>
-      )}
-      <div className="station-chart-range">
-        <span>{voltage.length ? `${Math.min(...voltage).toFixed(1)}–${Math.max(...voltage).toFixed(1)} V` : 'Voltage —'}</span>
-        <span>{current.length ? `${Math.min(...current).toFixed(1)}–${Math.max(...current).toFixed(1)} A` : 'Current —'}</span>
-      </div>
-    </div>
-  );
-}
-
-function chartPoints(values) {
-  const numeric = values.filter(Number.isFinite);
-  if (numeric.length === 0) return null;
-  const min = Math.min(...numeric);
-  const max = Math.max(...numeric);
-  const span = Math.max(max - min, 0.1);
-  return values
-    .map((value, index) => {
-      if (!Number.isFinite(value)) return null;
-      const x = values.length === 1 ? 160 : (index / (values.length - 1)) * 320;
-      const y = 82 - ((value - min) / span) * 72;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .filter(Boolean)
-    .join(' ');
 }

@@ -1,25 +1,20 @@
 import { useEvDispatch, useEvState } from '../state/store.js';
-import { PageHeader } from '../components/ui.jsx';
-import { IconClock, IconShield } from '../components/icons.jsx';
+import { PageHeader, InfoNote } from '../components/ui.jsx';
+import { IconCheck, IconClock, IconShield, IconWarning } from '../components/icons.jsx';
 import { THERMAL_LIMITS } from '../state/store.js';
-import { setHeat, setPumpRelay } from '../state/bms.js';
+import { setCooling, setFanRelay, setHeat, setPumpRelay } from '../state/bms.js';
 import { formatClock } from '../utils/format.js';
 
 export default function Thermal() {
   const state = useEvState();
   const dispatch = useEvDispatch();
-  const { temperature, pumpRelay, fanRelay, heatPercent, connectivity, manualFanOn } = state;
-  const coolingOn = pumpRelay === 1 || manualFanOn;
+  const { temperature, pumpRelay, fanRelay, heatPercent, cooling, thermalAcknowledged, connectivity } = state;
+  const coolingOn = pumpRelay === 1 || fanRelay === 1;
 
-  const tempHigh = temperature != null && temperature >= THERMAL_LIMITS.WARN_TEMP;
+  const overheated = temperature != null && temperature >= THERMAL_LIMITS.WARN_TEMP;
   const critical = temperature != null && temperature >= THERMAL_LIMITS.CRITICAL_TEMP;
-
-  function requestHeat(percent) {
-    dispatch({ type: 'SET_HEAT_LEVEL', percent });
-    setHeat(percent).catch((error) => {
-      console.error('Could not update the heater level:', error);
-    });
-  }
+  const manualMode = cooling.mode === 'manual';
+  const heaterLocked = overheated;
 
   return (
     <div className="screen">
@@ -27,7 +22,7 @@ export default function Thermal() {
         <span className="badge badge-neutral">Live BMS data</span>
         <div className="thermal-topbar-right">
           <span className="badge badge-outline">
-            <IconShield /> Automatic + manual control
+            <IconShield /> {manualMode ? 'Manual cooling control' : 'Automatic cooling control'}
           </span>
           <span className="badge badge-plain">
             <IconClock /> {formatClock(state.clock)}
@@ -39,16 +34,24 @@ export default function Thermal() {
       </div>
 
       <PageHeader
-        title="Artificial Battery Heating & Thermal Control"
-        subtitle="Driving keeps cooling OFF. Manual cooling or high temperature starts both pump and fan; charging starts them after 5 seconds."
+        title="Artificial Battery Heating & Thermal Safety"
+        subtitle="Live heating control with temperature feedback, plus automatic coolant pump and fan protection."
         showBadge={false}
       />
+
+      <InfoNote tone={overheated ? 'warning' : undefined} title="Battery thermal status">
+        {temperature == null
+          ? 'Waiting for live temperature data from the BMS.'
+          : overheated
+            ? 'Battery is overheated. Please turn on thermal cooling.'
+            : `Battery temperature is within the safe range (below ${THERMAL_LIMITS.WARN_TEMP}°C).`}
+      </InfoNote>
 
       <div className="thermal-status-row">
         <div className="card thermal-status-card">
           <span className="muted">Temperature Status</span>
-          <strong className={tempHigh ? 'text-danger' : 'text-ok'}>
-            {temperature == null ? '—' : tempHigh ? (critical ? 'CRITICAL' : 'HIGH') : 'NORMAL'}
+          <strong className={overheated ? 'text-danger' : 'text-ok'}>
+            {temperature == null ? '—' : overheated ? (critical ? 'CRITICAL' : 'WARNING') : 'NORMAL'}
           </strong>
           <p className="muted small">{temperature != null ? `${temperature.toFixed(1)} °C` : 'No reading yet.'}</p>
         </div>
@@ -63,9 +66,24 @@ export default function Thermal() {
           <p className="muted small">{fanRelay ? 'Fan extracting heat.' : 'Fan idle.'}</p>
         </div>
         <div className="card thermal-status-card">
-          <span className="muted">Heater</span>
-          <strong className={heatPercent > 0 ? 'text-warn' : 'text-ok'}>{heatPercent > 0 ? 'HEATING' : 'STANDBY'}</strong>
-          <p className="muted small">Heat output: {heatPercent}%</p>
+          <span className="muted">Charging Status</span>
+          <strong className={critical ? 'text-danger' : overheated ? 'text-warn' : 'text-ok'}>
+            {critical ? 'PAUSED' : overheated ? 'NORMAL ONLY' : 'ACTIVE'}
+          </strong>
+          <p className="muted small">
+            {critical
+              ? 'Charging is paused — critically overheated.'
+              : overheated
+                ? 'Fast charging disabled above the safety limit.'
+                : 'Charging is unaffected.'}
+          </p>
+        </div>
+        <div className="card thermal-status-card">
+          <span className="muted">Heater & Driver</span>
+          <strong className={heaterLocked ? 'text-danger' : heatPercent > 0 ? 'text-warn' : 'text-ok'}>
+            {heaterLocked ? 'SAFETY LOCKED' : heatPercent > 0 ? 'HEATING' : 'STANDBY'}
+          </strong>
+          <p className="muted small">Heat output: {heatPercent > 0 && !heaterLocked ? 'ACTIVE' : 'OFF'} · {heatPercent}%</p>
         </div>
       </div>
 
@@ -73,6 +91,24 @@ export default function Thermal() {
         <div className="thermal-col-main">
           <div className="card">
             <h3 className="card-title">Cooling Control (Liquid Cooling)</h3>
+
+            <div className="heater-row">
+              <div className="heater-field">
+                <span className="muted">Cooling ON above</span>
+                <span className="badge badge-warn">{THERMAL_LIMITS.COOLING_ON_TEMP}°C</span>
+              </div>
+              <div className="heater-field">
+                <span className="muted">Cooling OFF at or below</span>
+                <span className="pwm-box">{THERMAL_LIMITS.COOLING_OFF_TEMP}°C</span>
+              </div>
+              <div className={`safety-lock ${overheated ? 'active' : ''}`}>
+                <IconShield />
+                <div>
+                  <strong>COOLING</strong>
+                  <p>{coolingOn ? 'Pump and fan are ON' : 'Pump and fan are OFF'}</p>
+                </div>
+              </div>
+            </div>
 
             <div className="heater-system-summary">
               <HeaterSystemItem label="Coolant pump (Relay1)" value={pumpRelay ? 'RUNNING' : 'IDLE'} active={!!pumpRelay} />
@@ -84,43 +120,60 @@ export default function Thermal() {
             <div className="thermal-test-actions">
               <button
                 type="button"
-                className="btn btn-accent"
-                disabled={pumpRelay === 1 && manualFanOn}
-                onClick={() => {
-                  setPumpRelay(true);
-                  dispatch({ type: 'SET_MANUAL_FAN', on: true });
-                }}
+                className={`btn ${!manualMode ? 'btn-accent' : 'btn-outline'}`}
+                onClick={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'automatic' })}
               >
-                Turn cooling ON
+                Automatic
               </button>
               <button
                 type="button"
-                className="btn btn-outline"
-                disabled={!coolingOn}
-                onClick={() => {
-                  setPumpRelay(false);
-                  dispatch({ type: 'SET_MANUAL_FAN', on: false });
-                }}
+                className={`btn ${manualMode ? 'btn-accent' : 'btn-outline'}`}
+                onClick={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'manual' })}
               >
-                Turn cooling OFF
+                Manual
               </button>
             </div>
-            <div className="thermal-test-actions">
-              <button
-                type="button"
-                className={pumpRelay ? 'btn btn-accent' : 'btn btn-outline'}
-                onClick={() => setPumpRelay(!pumpRelay)}
-              >
-                Pump (Relay1): {pumpRelay ? 'ON' : 'OFF'}
-              </button>
-              <button
-                type="button"
-                className={manualFanOn ? 'btn btn-accent' : 'btn btn-outline'}
-                onClick={() => dispatch({ type: 'SET_MANUAL_FAN', on: !manualFanOn })}
-              >
-                Manual Fan: {manualFanOn ? 'ON' : 'OFF'}
-              </button>
-            </div>
+
+            {!manualMode ? (
+              <p className="muted small">
+                Coolant pump and fan both switch ON automatically once the battery goes above{' '}
+                {THERMAL_LIMITS.COOLING_ON_TEMP}°C, and OFF again once it cools back to{' '}
+                {THERMAL_LIMITS.COOLING_OFF_TEMP}°C. They also engage whenever the heating level reaches{' '}
+                {THERMAL_LIMITS.HEAT_SAFETY_THRESHOLD}%.
+              </p>
+            ) : (
+              <>
+                <div className="thermal-test-actions">
+                  <button type="button" className="btn btn-accent" disabled={coolingOn} onClick={() => setCooling(true)}>
+                    Turn cooling ON
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    disabled={!pumpRelay && !fanRelay}
+                    onClick={() => setCooling(false)}
+                  >
+                    Turn cooling OFF
+                  </button>
+                </div>
+                <div className="thermal-test-actions">
+                  <button
+                    type="button"
+                    className={pumpRelay ? 'btn btn-accent' : 'btn btn-outline'}
+                    onClick={() => setPumpRelay(!pumpRelay)}
+                  >
+                    Pump (Relay1): {pumpRelay ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    type="button"
+                    className={fanRelay ? 'btn btn-accent' : 'btn btn-outline'}
+                    onClick={() => setFanRelay(!fanRelay)}
+                  >
+                    Fan (Relay2): {fanRelay ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="card">
@@ -131,7 +184,11 @@ export default function Thermal() {
                 <span className="muted">Heating Level</span>
                 <span className="badge badge-warn">{heatPercent}%</span>
               </div>
-              <div className="safety-lock">
+              <div className="heater-field">
+                <span className="muted">Safety Cutoff</span>
+                <span className="pwm-box">{THERMAL_LIMITS.WARN_TEMP}°C</span>
+              </div>
+              <div className={`safety-lock ${heaterLocked ? 'active' : ''}`}>
                 <IconShield />
                 <div>
                   <strong>HEATER</strong>
@@ -142,27 +199,78 @@ export default function Thermal() {
 
             <label className="pwm-slider-label">
               Requested heating level (%)
-              <input type="range" min="0" max="100" value={heatPercent} onChange={(e) => requestHeat(Number(e.target.value))} />
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={heatPercent}
+                disabled={heaterLocked}
+                onChange={(e) => setHeat(Number(e.target.value))}
+              />
             </label>
 
             <div className="thermal-test-actions">
-              <button type="button" className="btn btn-accent" disabled={heatPercent > 0} onClick={() => requestHeat(40)}>
+              <button
+                type="button"
+                className="btn btn-accent"
+                disabled={heaterLocked || heatPercent > 0}
+                onClick={() => setHeat(40)}
+              >
                 Turn heater ON
               </button>
-              <button type="button" className="btn btn-outline" disabled={heatPercent === 0} onClick={() => requestHeat(0)}>
+              <button type="button" className="btn btn-outline" disabled={heatPercent === 0} onClick={() => setHeat(0)}>
                 Turn heater OFF
               </button>
             </div>
 
+            {heaterLocked && (
+              <InfoNote tone="warning">
+                Heating locked OFF — battery temperature is at or above the {THERMAL_LIMITS.WARN_TEMP}°C safety limit.
+              </InfoNote>
+            )}
             <p className="muted small">
-              Heat % controls the temperature-rise rate. At 30 °C the heater turns OFF and both the pump and fan turn ON;
-              temperature then falls by 0.5 °C per second. Cooling turns OFF at 27 °C.
+              Simulates battery temperature rise for thermal-safety demonstration. Automatically cuts off at the safety
+              limit.
             </p>
           </div>
         </div>
 
         <ThermalDiagram pumpRelay={pumpRelay} fanRelay={fanRelay} heatPercent={heatPercent} temperature={temperature} />
       </div>
+
+      {overheated && (
+        <div className="card temp-warning-card">
+          <div className="temp-warning-head">
+            <IconWarning />
+            <div>
+              <strong>Battery Overheated</strong>
+              <p>Battery is overheated. Please turn on thermal cooling.</p>
+            </div>
+          </div>
+          <div className="temp-warning-actions-block">
+            <span className="muted">Take action:</span>
+            <ul>
+              <li>Switch to Manual mode and turn the pump and fan ON if they have not engaged.</li>
+              <li>Verify coolant flow, pump and fan operation.</li>
+              <li>Reduce or pause charging until temperature returns to a safe range.</li>
+            </ul>
+          </div>
+          <div className="temp-warning-buttons">
+            <button
+              type="button"
+              className="btn btn-outline"
+              disabled={thermalAcknowledged}
+              onClick={() => dispatch({ type: 'ACK_THERMAL_ALERT' })}
+            >
+              <IconCheck /> {thermalAcknowledged ? 'Acknowledged' : 'Acknowledge Alert'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <InfoNote>
+        <strong>Note:</strong> Thresholds depend on battery and charger specifications.
+      </InfoNote>
     </div>
   );
 }

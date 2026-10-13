@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { computeAlerts, DIRECTION_LABEL, useEvDispatch, useEvState } from '../state/store.js';
 import { THERMAL_LIMITS } from '../state/store.js';
-import { PageHeader, Sparkline, StatusDot } from '../components/ui.jsx';
+import { PageHeader, InfoNote, Sparkline, StatusDot } from '../components/ui.jsx';
 import {
   IconBattery,
   IconBolt,
@@ -14,24 +14,34 @@ import {
   IconThermo,
   IconWarning,
 } from '../components/icons.jsx';
+import { setCooling } from '../state/bms.js';
 import { formatClock } from '../utils/format.js';
-import Scene3D from '../components/Scene3D.jsx';
 
 const STATION_META = {
   available: { label: 'Available', color: 'green' },
   occupied: { label: 'Occupied', color: 'red' },
-  engaged: { label: 'Engaged', color: 'red' },
   reserved: { label: 'Reserved', color: 'blue' },
   charging: { label: 'Charging', color: 'teal' },
 };
 
 const VEHICLE_LABEL = { idle: 'Idle', moving: 'Moving', arrived: 'Arrived', charging: 'Charging' };
 
+const THERMAL_ALERT_IDS = new Set([
+  'overheat',
+  'critical-temp',
+  'rapid-temperature-rise',
+  'repeated-overheat',
+  'frequent-cooling',
+  'heater-pwm-high',
+]);
+
 const ALERT_TITLES = {
   overheat: 'Battery Temp is High',
   'critical-temp': 'Battery Temp is Critical',
   'rapid-temperature-rise': 'Battery Temp is High',
   'repeated-overheat': 'Battery Temp is High',
+  'frequent-cooling': 'Cooling Running Frequently',
+  'heater-pwm-high': 'Heating Level Too High',
   'low-battery': 'Low Battery',
   'voltage-drop': 'Voltage Instability',
   'current-swing': 'Current Instability',
@@ -61,6 +71,7 @@ function chargeStateLabel(state) {
 export default function Overview() {
   const state = useEvState();
   const dispatch = useEvDispatch();
+  const lowBattery = state.soc != null && state.soc <= THERMAL_LIMITS.LOW_SOC_THRESHOLD;
   const overheated = state.temperature != null && state.temperature >= THERMAL_LIMITS.WARN_TEMP;
   const activeAlerts = computeAlerts(state).filter((alert) => alert.status === 'active');
   const [popupAlert, setPopupAlert] = useState(null);
@@ -103,12 +114,7 @@ export default function Overview() {
 
   const soh = healthCondition(state.soh);
   const chargeState = chargeStateLabel(state);
-  const vehicleStatusLabel = state.charging.mode === 'complete' ? 'Vehicle Full' : VEHICLE_LABEL[state.vehicleStatus];
-  // Stations are already sorted nearest-first; prefer ones with a free bay.
-  const nearestStations = [...state.stations]
-    .sort((a, b) => (b.status === 'available') - (a.status === 'available'))
-    .slice(0, 3);
-  const nearestStation = nearestStations[0];
+  const nearestStations = state.stations.slice(0, 3);
 
   return (
     <div className="screen">
@@ -118,12 +124,6 @@ export default function Overview() {
           <div>
             <strong>Battery Alert</strong>
             <p>{popupAlert.label}</p>
-            {popupAlert.id === 'low-battery' && nearestStation && (
-              <p>
-                Nearest charging station: <strong>{nearestStation.name}</strong>
-                {nearestStation.distance != null ? ` (${nearestStation.distance.toFixed(1)} km)` : ''}
-              </p>
-            )}
           </div>
         </div>
       )}
@@ -161,6 +161,13 @@ export default function Overview() {
           icon={<IconBolt />}
         />
         <MetricCard
+          label="Station Voltage"
+          value={state.stationVoltage != null ? `${state.stationVoltage.toFixed(2)} V` : '—'}
+          sub="Voltage2"
+          tone="info"
+          icon={<IconStation />}
+        />
+        <MetricCard
           label="Current"
           value={state.current != null ? `${state.current.toFixed(2)} A` : '—'}
           tone="info"
@@ -174,84 +181,120 @@ export default function Overview() {
         />
       </div>
 
-      <div className="overview-split">
-        <section className="alerts-panel card" aria-label="Live battery alerts">
-          <div className="alerts-panel-header">
-            <IconWarning className={activeAlerts.length ? 'text-warn' : 'muted'} />
-            <h2>Alerts{activeAlerts.length ? ` (${activeAlerts.length})` : ''}</h2>
+      <section className="alerts-panel card" aria-label="Live battery alerts">
+        <div className="alerts-panel-header">
+          <IconWarning className={activeAlerts.length ? 'text-warn' : 'muted'} />
+          <h2>Alerts{activeAlerts.length ? ` (${activeAlerts.length})` : ''}</h2>
+        </div>
+
+        {activeAlerts.length === 0 ? (
+          <div className="overview-alert nominal">
+            <IconCheck />
+            <span>No active battery alerts. All monitored conditions are within the configured limits.</span>
           </div>
-
-          {activeAlerts.length === 0 ? (
-            <div className="overview-alert nominal">
-              <IconCheck />
-              <span>No active battery alerts. All monitored conditions are within the configured limits.</span>
-            </div>
-          ) : (
-            <div className="alert-item-list">
-              {activeAlerts.map((alert) => {
-                const startedAt = state.alertTimestamps[alert.id];
-                return (
-                  <div key={alert.id} className={`alert-item ${alert.severity}`}>
-                    <div className="alert-item-head">
-                      <IconWarning />
-                      <div>
-                        <strong>{alertTitle(alert)}</strong>
-                        <p>{alert.label}</p>
-                      </div>
-                      {startedAt && <span className="alert-item-time">{formatClock(new Date(startedAt))}</span>}
+        ) : (
+          <div className="alert-item-list">
+            {activeAlerts.map((alert) => {
+              const isThermal = THERMAL_ALERT_IDS.has(alert.id);
+              const manualMode = state.cooling.mode === 'manual';
+              const startedAt = state.alertTimestamps[alert.id];
+              return (
+                <div key={alert.id} className={`alert-item ${alert.severity}`}>
+                  <div className="alert-item-head">
+                    <IconWarning />
+                    <div>
+                      <strong>{alertTitle(alert)}</strong>
+                      <p>{alert.label}</p>
                     </div>
+                    {startedAt && <span className="alert-item-time">{formatClock(new Date(startedAt))}</span>}
+                  </div>
 
-                    {alert.id === 'low-battery' && (
-                      <div className="alert-item-stations">
-                        <span className="muted small">Nearest charging stations (free bays first)</span>
-                        <div className="alert-station-list">
-                          {nearestStations.map((station) => {
-                            const meta = STATION_META[station.status] || STATION_META.occupied;
-                            return (
-                              <button
-                                key={station.id}
-                                type="button"
-                                className="alert-station-row"
-                                onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
-                              >
-                                <IconStation />
-                                <div className="alert-station-info">
-                                  <strong>{station.name}</strong>
-                                  <StatusDot color={meta.color} label={`${station.availableSlots}/${station.totalSlots} slots free`} />
-                                </div>
-                                <span className="alert-station-distance">
-                                  {station.distance != null ? `${station.distance.toFixed(1)} km` : '—'}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
+                  {isThermal && (
+                    <div className="alert-item-controls">
+                      <div className="mode-toggle">
+                        <span className="muted small">Mode</span>
+                        <label>
+                          <input
+                            type="radio"
+                            checked={!manualMode}
+                            onChange={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'automatic' })}
+                          />
+                          Automatic
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            checked={manualMode}
+                            onChange={() => dispatch({ type: 'SET_COOLING_MODE', mode: 'manual' })}
+                          />
+                          Manual
+                        </label>
+                      </div>
+                      <div className="alert-item-buttons">
                         <button
                           type="button"
-                          className="btn btn-accent btn-block"
-                          onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+                          className="btn btn-accent"
+                          disabled={!manualMode || (!!state.pumpRelay && !!state.fanRelay)}
+                          onClick={() => setCooling(true)}
                         >
-                          Find a charging station →
+                          Turn ON Cooling
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline"
+                          disabled={!manualMode || (!state.pumpRelay && !state.fanRelay)}
+                          onClick={() => setCooling(false)}
+                        >
+                          Turn OFF Cooling
                         </button>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                    </div>
+                  )}
 
-          <button type="button" className="alerts-panel-link" onClick={() => dispatch({ type: 'GO_TO', screen: 'health' })}>
-            View All Alerts →
-          </button>
-        </section>
+                  {alert.id === 'low-battery' && (
+                    <div className="alert-item-stations">
+                      <span className="muted small">Nearest charging stations</span>
+                      <div className="alert-station-list">
+                        {nearestStations.map((station) => {
+                          const meta = STATION_META[station.status];
+                          return (
+                            <button
+                              key={station.id}
+                              type="button"
+                              className="alert-station-row"
+                              onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+                            >
+                              <IconStation />
+                              <div className="alert-station-info">
+                                <strong>{station.name}</strong>
+                                <StatusDot color={meta.color} label={`${station.availableSlots}/${station.totalSlots} slots free`} />
+                              </div>
+                              <span className="alert-station-distance">
+                                {station.distance != null ? `${station.distance.toFixed(1)} km` : '—'}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-accent btn-block"
+                        onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+                      >
+                        Find a charging station →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
-        <Scene3D
-          title="Live Vehicle Route Position"
-          hint={`120 × 160 cm map · current command: ${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}
-          mode="drive"
-        />
-      </div>
+        <button type="button" className="alerts-panel-link" onClick={() => dispatch({ type: 'GO_TO', screen: 'health' })}>
+          View All Alerts →
+        </button>
+      </section>
 
       <div className="trend-row">
         <TrendCard
@@ -276,7 +319,7 @@ export default function Overview() {
           <IconCar />
           <div>
             <span className="status-strip-label">Vehicle</span>
-            <strong>{vehicleStatusLabel}</strong>
+            <strong>{VEHICLE_LABEL[state.vehicleStatus]}</strong>
           </div>
         </div>
         <div className="status-strip-item">
@@ -307,6 +350,55 @@ export default function Overview() {
             <strong>{`${DIRECTION_LABEL[state.direction] || state.direction} (${state.direction})`}</strong>
           </div>
         </div>
+      </div>
+
+      <div className="vehicle-hero">
+        <div className="vehicle-hero-road" />
+        <div className="vehicle-hero-car">
+          <IconCar width="72" height="72" />
+        </div>
+      </div>
+
+      {lowBattery && (
+        <InfoNote tone="warning" title="Low battery">
+          <div className="low-battery-row">
+            <span>Battery running low. Please find the nearby charging station to continue your peaceful journey.</span>
+            <button type="button" className="btn btn-accent" onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}>
+              Choose charging station →
+            </button>
+          </div>
+        </InfoNote>
+      )}
+
+      {overheated && (
+        <InfoNote tone="warning" title="Battery overheated">
+          <div className="low-battery-row">
+            <span>Battery is overheated. Please turn on thermal cooling.</span>
+            <button type="button" className="btn btn-accent" onClick={() => dispatch({ type: 'GO_TO', screen: 'thermal' })}>
+              Open thermal control →
+            </button>
+          </div>
+        </InfoNote>
+      )}
+
+      <div className="station-strip">
+        {state.stations.map((s) => {
+          const meta = STATION_META[s.status];
+          return (
+            <button
+              key={s.id}
+              type="button"
+              className="station-chip"
+              onClick={() => dispatch({ type: 'GO_TO', screen: 'stations' })}
+            >
+              <span className="station-chip-id">S{s.id}</span>
+              <span>
+                <strong>{s.name}</strong>
+                <StatusDot color={meta.color} label={`${s.availableSlots}/${s.totalSlots} slots free`} />
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       <p className="last-update">

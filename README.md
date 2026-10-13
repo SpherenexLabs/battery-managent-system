@@ -2,25 +2,9 @@
 
 A live React dashboard for an EV battery-management prototype. It reads real-time
 telemetry from an IoT controller (published to Firebase Realtime Database under
-`BMS_5578`), derives battery state, raises predictive failure alerts, and writes
+`bms_5578`), derives battery state, raises predictive failure alerts, and writes
 control commands back to the hardware — drive direction, artificial heating level,
 coolant pump relay, and cooling fan relay.
-
-> **Current station-control workflow:** Automatic navigation now uses the controller's
-> built-in `BMS_5578/Execute_Path` and `BMS_5578/Path_Name` fields. Reserving first
-> writes `Execute_Path = 1`, waits until the controller writes `Ready` back to that
-> field, and only then writes the mapped controller path to `Path_Name` (Station 1
-> writes path 2; Station 2 writes path 1). The `/BMS` branch
-> supplies four-station `Current*`, `Voltage*`, and `Switch*` (or `Relay*`) telemetry;
-> the dashboard mirrors those switches to complementary `green1`…`green4`,
-> `red1`…`red4`, and `Relay1`…`Relay4` outputs. A charging relay is first energised only
-> when the reserved station's ultrasonic distance is below 20 cm, then remains latched
-> until Stop or 100% completion. Older saved-route
-> descriptions later in this document describe the retained legacy helpers, not the
-> current Auto-mode UI.
-
-After the Ready handshake, the selected `Path_Name` remains set. The dashboard does
-not automatically write `0`; only an explicit **Stop vehicle** command clears it.
 
 The dashboard covers the full journey: **monitor the battery → detect a low/overheat
 condition → find and reserve a nearby wireless charging station → drive the vehicle
@@ -53,17 +37,17 @@ health and alerts.**
 | Area | What it does |
 | --- | --- |
 | Live telemetry | Vehicle voltage, station voltage, current, temperature, heating level, pump relay, fan relay and drive direction — streamed from Firebase with no polling |
-| Battery state | Live SOC is voltage-derived before a trip; reservation starts a 50–75% journey simulation that drains toward 25% while moving and rises only during relay-confirmed charging |
-| Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `BMS_5578/direction` |
-| Auto driving | Station reservation writes the selected station number to `Path_Name`; one optional global Initialize button writes `Execute_Path = 1` and waits for `Ready` |
-| Live path feedback | `Slot1`…`Slot4` provide vehicle-to-station distance and drive the journey progress/arrival animation |
-| Reserve & go | Station 1 → path 1, Station 2 → path 2, Station 3 → path 3, Station 4 → path 4 |
-| 3D animation | The same scaled 120 × 160 cm route map on Overview, Drive Control and Charging, with a top-view car, current-step guidance, completed-path tracking and final-position reporting |
+| Battery state | SOC derived from vehicle pack voltage, SOH estimated from temperature/voltage |
+| Manual driving | A five-button joystick that writes `F` / `B` / `L` / `R` / `S` straight to `bms_5578/direction` |
+| Auto driving | Named routes of timed direction steps ("forward 5s, left 10s, right 8s, backward 9s"), stored in Firebase, with create / edit / delete and timed playback |
+| Test before saving | Any step, or a whole draft, can be sent to the vehicle for real while you are still editing it — so a timing can be checked against the hardware before it is committed |
+| Reserve & play | Reserving a station means picking one of your saved routes; confirming the reservation plays it immediately |
+| 3D animation | A live three.js view of the vehicle driving the yard and docking, with wireless-charging energy rings — driven by the same `direction` command the controller receives |
 | 360° camera | Orbit the scene a full turn with the mouse — drag to look around, scroll to zoom, right-drag to pan, one button to reset |
 | Alerts | 12 rule-based alerts covering low battery, overheating, voltage/current/SOC instability, slow charging, repeated overheat, frequent cooling, and BMS offline |
-| Thermal safety | Pump and fan remain OFF while the vehicle moves. Charging starts in Fast mode, then switches to Normal and turns both cooling relays ON after 5 seconds. Manual or 30 °C temperature cooling turns both ON immediately until cooling reaches 27 °C |
-| Stations | 4 live stations with switch-driven green/red state, current/voltage/power graphs, slot distance, reservation, and Three.js animation |
-| Wireless charging | A valid ultrasonic echo below 20 cm requests the reserved station relay; charging time/energy begin only after `RelayN = 1` feedback |
+| Thermal safety | Automatic pump + fan cooling with hysteresis, heating safety cut-off, fast-charge downgrade, and automatic charging pause on critical temperature |
+| Stations | 4 wireless charging stations with live occupancy, current/voltage/power, GPS distance and compass bearing, reservation, and Google Maps directions |
+| Wireless charging | Arrival + coil-alignment confirmation, charge modes, live power, session timer, and energy integration |
 | Health | Alert table with severity/status, event log with real timestamps, and operator acknowledgement |
 
 ---
@@ -73,7 +57,7 @@ health and alerts.**
 ```
 ┌───────────────────────┐        writes         ┌────────────────────────┐
 │  IoT / BMS Controller │  ──────────────────▶  │  Firebase Realtime DB  │
-│  (ESP32 / Arduino)    │                       │    /BMS_5578  (live)   │
+│  (ESP32 / Arduino)    │                       │    /bms_5578  (live)   │
 │                       │  ◀──────────────────  │    /auto_routes (saved)│
 │  • Voltage1 (vehicle) │        reads          └───────────┬────────────┘
 │  • Voltage2 (station) │                                   │
@@ -112,7 +96,7 @@ helpers.
 
 On mount, [EvContext.jsx](src/state/EvContext.jsx) opens two Firebase listeners:
 
-- `subscribeBmsData()` — an `onValue` stream on the `/BMS_5578` node. Every hardware
+- `subscribeBmsData()` — an `onValue` stream on the `/bms_5578` node. Every hardware
   write fires a `BMS_UPDATE` action carrying the whole snapshot.
 - `subscribeConnection()` — watches `.info/connected` to drive the **IoT Cloud Link**
   online/offline badge and the `offline` alert.
@@ -144,11 +128,8 @@ and the drive controls write on click:
 
 | Controller | Trigger | Write |
 | --- | --- | --- |
-| Dashboard heating | `Heat` slider above 0% and fan OFF | Raises `Temp` from 0.1–0.6 °C/s according to Heat % |
-| Manual cooling override | Operator presses Manual Fan ON/OFF | Turns the coolant pump and both fan relay paths ON together until Manual OFF is pressed |
-| Charging cooling delay | Relay-confirmed charging remains active for 5 seconds | Coolant pump `Relay1` and fan `Relay2` turn ON together and remain ON for the session |
-| Automatic cooling | Temperature ≥ 30 °C | Pump and both fan relay paths become `1`; temperature cools by 0.5 °C/s and cannot rise while cooling is ON |
-| Cooling hysteresis | Temperature ≤ 27 °C | Automatic pump and fan requests return to `0` |
+| Automatic cooling | Temperature ≥ 65 °C **or** heating level ≥ 65 % | `Relay1 = 1` **and** `Relay2 = 1`; both released only when temperature ≤ 60 °C **and** heat < 65 % (hysteresis prevents relay chatter) |
+| Heating safety cut-off | Temperature ≥ 65 °C while `Heat` > 0 | `Heat = 0` — overrides the operator's manual slider |
 | Safety stop | Vehicle arrives, or the operator halts it | `direction = 'S'` |
 | Manual joystick | Operator presses a pad button | `direction = 'F' \| 'B' \| 'L' \| 'R' \| 'S'` |
 | Auto route playback | Each step's turn comes up | That step's `direction`, held for the step's duration, then `'S'` at the end |
@@ -170,25 +151,24 @@ A station's position is resolved in priority order:
 ### 3.5 Reservation → drive → charging chain
 
 ```
-RESERVE_STATION ──▶ Execute_Path = 1 ──▶ wait for "Ready"
+SELECT_STATION ──▶ reservationStatus: 'pending'
        │
-Path_Name = mapped controller path ──▶ vehicleStatus: 'moving'
+SELECT_ROUTE ──▶ one of the saved auto routes is chosen to drive
        │
-selected SlotN > 0 and < 20 cm ──▶ 'S' written, vehicle reached + alignment confirmed
+CONFIRM_RESERVATION ──▶ vehicleStatus: 'moving', driveMode 'auto',
+       │                 the chosen route starts playing, jumps to Drive Control
+PLAYBACK_TICK x N ──▶ each step's letter written for its duration
        │
-selected RelayN = 1 requested ──▶ wait for `/BMS/RelayN = 1` feedback
+last step ends ──▶ 'S' written, vehicleStatus: 'arrived',
+       │            CONFIRM_ARRIVAL after 900 ms
+START_CHARGING_SESSION ──▶ coilAligned, charging active, jumps to Charging
        │
-relay confirmed ON ──▶ charging timer/energy calculation starts, Charging opens
-       │
-TICK ──▶ simulated SOC rises to 100 % ──▶ charging stops and "Vehicle Full" is displayed
-       │                         selected RelayN returns to OFF
+BMS_UPDATE ──▶ SOC 100 % ──▶ mode 'complete', session ends
 ```
 
-Automatic charging is sensor-driven and uses only the reserved station's ultrasonic
-field (`Slot1`…`Slot4`). Only a value greater than 0 and below 20 cm triggers arrival;
-`0`, `-1`, and values of 20 cm or more cannot start it. After arrival, the relay request
-is latched so sensor fluctuations cannot interrupt charging. The ultrasonic value detects arrival only; charging calculations
-remain stopped until the selected station's relay reports ON.
+Reaching the **end of the route is what marks arrival** — there is no separate
+arrival timer or sensor. Playback is cancelled (and `S` written) by switching to
+Manual, pressing **Stop vehicle**, or deleting the running route.
 
 Safety can interrupt this chain at any point: critical temperature pauses charging, and
 fast mode is blocked whenever the battery is above the warning limit.
@@ -197,11 +177,11 @@ fast mode is blocked whenever the battery is above the warning limit.
 
 ## 4. Firebase Data Contract
 
-Live telemetry lives under **`/BMS_5578`**; saved auto routes live under
+Live telemetry lives under **`/bms_5578`**; saved auto routes live under
 **`/auto_routes`**. The dashboard reads every field it knows and ignores anything else,
 so extra keys are harmless.
 
-### `/BMS_5578` — live telemetry
+### `/bms_5578` — live telemetry
 
 | Key | Type | Direction | Meaning |
 | --- | --- | --- | --- |
@@ -248,26 +228,22 @@ telemetry node so the controller's live stream carries only live values.
 
 ### Optional station fields
 
-All optional — supply them under `/BMS_5578` to replace the prototype defaults.
+All optional — supply them under `/bms_5578` to replace the prototype defaults.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `Slot1` … `Slot4` | number | Ultrasonic distance in cm. `0`/`-1` = invalid or no echo; `1`–`40` cm = object/robot detected; above 40 cm = not yet at station |
+| `Slot1` … `Slot4` | number | Ultrasonic bay distance in cm. `-1` = free; `0`–`40` cm = occupied. Also written by the "Simulate" buttons |
 | `Station{N}Filled` | number | Occupied bays, overrides the slot-sensor inference |
 | `Station{N}Total` | number | Total bays at that station (default 1) |
 | `Station{N}Lat` / `Station{N}Lng` | number | Real station coordinates |
 | `Station{N}Name` | string | Display name for that station |
 | `Station{N}Current` / `Station{N}Voltage` | number | Electrical readings for stations 2–4 (station 1 uses `Current` and `Voltage2`) |
 
-The station-control branch `/BMS` exposes `Relay1`…`Relay4`. The dashboard writes the
-selected relay to `1` after ultrasonic arrival and waits for that same relay value to be
-observed before starting the charging timer and energy integration.
-
 ### Example live snapshot
 
 ```json
 {
-  "BMS_5578": {
+  "bms_5578": {
     "Current": 0,
     "Heat": 0,
     "Relay1": 0,
@@ -292,12 +268,6 @@ vehicle pack voltage (`Voltage1`) and clamped to 0–100 %:
 ```
 SOC = (Voltage1 − 9.5) / (12.6 − 9.5) × 100
 ```
-
-When a station reservation starts, journey simulation takes over: SOC is clamped into
-the requested 50–75% starting range, falls by 0.1 percentage point per second while
-the vehicle is moving (never below 25%), and rises by 0.5 point per second only while the selected
-station relay is confirmed ON. Live voltage continues to be displayed but does not
-overwrite the simulated journey SOC.
 
 > **You will almost certainly need to change this.** `9.5 V` and `12.6 V` are the
 > pack's empty and full voltages. If your sensor reports a scaled value (the live node
@@ -324,15 +294,15 @@ SOH = 100 − min(30, (Temp − 45) × 1.5)   when Temp > 45 °C
 | Live charging power | `abs(Voltage1 × Current)` watts |
 | Energy delivered | Power integrated every second: `energyWh += watts / 3600` |
 | Station 1 power | `abs(Current × Voltage2)` watts |
-| Bay occupied / robot detected | Slot reading between `1` and `40` cm |
+| Bay occupied | Slot reading between `0` and `40` cm |
 
 ### Thermal thresholds
 
 | Constant | Value | Effect |
 | --- | --- | --- |
-| Fan-off threshold | 27 °C | Automatic fan releases at or below this hysteresis point |
-| `WARN_TEMP` | 30 °C | Automatic fan engages |
-| `CRITICAL_TEMP` | 40 °C | Critical-temperature alert |
+| `SAFE_TEMP` | 60 °C | Pump and fan release at or below this (hysteresis point) |
+| `WARN_TEMP` | 65 °C | Pump + fan engage, heating force-cut to 0 %, fast charging downgraded |
+| `CRITICAL_TEMP` | 70 °C | Charging paused automatically; all mode buttons disabled |
 | `LOW_SOC_THRESHOLD` | 15 % | Low-battery alert with nearest-station shortcuts |
 | `HEAT_SAFETY_THRESHOLD` | 65 % heat | Proactively engages cooling before the battery gets hot |
 
@@ -347,8 +317,8 @@ diagnosis.
 | Alert | Rule | Severity |
 | --- | --- | --- |
 | Low battery | SOC ≤ 15 % | High |
-| Battery overheated | Temp ≥ 30 °C | High |
-| Critically overheated | Temp ≥ 40 °C | High |
+| Battery overheated | Temp ≥ 65 °C | High |
+| Critically overheated | Temp ≥ 70 °C | High |
 | Heating level too high | `Heat` ≥ 65 % | High |
 | Repeated overheat | ≥ 3 overheat events in 15 min | High |
 | Frequent cooling | ≥ 3 pump activations in 15 min | Medium |
@@ -369,7 +339,7 @@ When no rule fires, a single resolved **"No active battery alerts"** row is show
 
 - **Node.js 20.19+ or 22.12+** (required by Vite 8)
 - A Firebase project with **Realtime Database** enabled
-- An IoT controller writing to the `/BMS_5578` node (or write values manually in the
+- An IoT controller writing to the `/bms_5578` node (or write values manually in the
   Firebase console to test)
 - A browser with geolocation permission — distances and directions need it
 
@@ -394,7 +364,7 @@ npm run dev        # dev server with hot reload -> http://localhost:5173
 The database URL is set in [src/firebase.js](src/firebase.js):
 
 ```
-https://diet-planner-3bdf3-default-rtdb.firebaseio.com
+https://smart-vehicle-2eeac-default-rtdb.firebaseio.com
 ```
 
 Realtime Database reaches the server through `databaseURL` alone, so that field is the
@@ -407,7 +377,7 @@ For a prototype with no authentication, the database rules must allow reads and 
 ```json
 {
   "rules": {
-    "BMS_5578":    { ".read": true, ".write": true },
+    "bms_5578":    { ".read": true, ".write": true },
     "auto_routes": { ".read": true, ".write": true }
   }
 }
@@ -423,7 +393,7 @@ For a prototype with no authentication, the database rules must allow reads and 
 2. **Allow** the browser's location prompt when asked.
 3. Check the sidebar's **IoT Cloud Link** badge reads **Online** (green).
 4. Confirm the Overview metric cards show real numbers, not `—`. A dash means no data
-   has arrived on `/BMS_5578` yet.
+   has arrived on `/bms_5578` yet.
 
 ---
 
@@ -503,12 +473,15 @@ forces a fresh high-accuracy fix. If location is blocked, distances and directio
 | Engagement | `Not engaged` → `Reservation pending` → `Vehicle en route` → `Docking engaged` → `Charging engaged` |
 | IoT link | `LIVE` / `OFFLINE` |
 
-**Controls:**
+**Buttons on each card:**
 
-- **Initialize Controller** — one optional global control that writes `Execute_Path = 1`
-  and waits for `Ready`. Reservation is not blocked when initialization is unnecessary.
-- **Reserve Station N** — writes that station number directly to `Path_Name` and begins
-  live route tracking.
+- **Reserve** — selects the station (only available stations can be selected). Click
+  again on the selected card, now labelled **Reserve & Navigate**, or use the side
+  panel's confirm button.
+- **Directions** — opens Google Maps driving directions from the vehicle's live position
+  to that station in a new tab.
+- **Simulate Occupied / Free Slot** — writes `bms_5578/Slot{N}` to fake a vehicle in
+  that bay. Use this to demo occupancy handling without physical hardware.
 
 **Right-hand panel** (after selecting a station) shows the full reservation detail, an
 **Auto route to drive** picker, a three-step progress list, and the confirm button.
@@ -522,11 +495,11 @@ Control.
 
 **How to use it:**
 
-1. Optionally press **Initialize Controller** when the hardware requires initialization.
-2. Pick an available station and click **Reserve Station N**.
-3. The controller receives `Path_Name = N` and live route tracking begins.
-4. Below 20 cm, the station relay is requested automatically and charging begins after
-   relay confirmation.
+1. Confirm the location bar shows coordinates.
+2. Pick an **Available** station and click **Reserve**.
+3. Choose which saved route should drive the vehicle there.
+4. Click **Confirm & Play** — the station is locked, the app switches to Drive Control,
+   and the route starts playing straight away.
 
 ---
 
@@ -536,23 +509,22 @@ This is where you actually drive the vehicle. Two modes, switched with the **Man
 Auto** toggle at the top.
 
 **Drive status banner.** Plain-language status plus the **live command** currently
-sitting in `BMS_5578/direction`.
+sitting in `bms_5578/direction`.
 
-**Live route map.** A three.js representation of the 120 × 160 cm demonstration sheet.
-A small top-view car always starts at the bottom centre `(60 cm, 0 cm)`. During playback,
-a yellow guide shows only the current command ahead of the car; future steps remain
-hidden. The completed path is retained in cyan, and the ending position is marked and
-reported in centimetres.
+**Live 3D View.** A three.js scene of the charging yard — ground grid, all four station
+pads (the reserved one highlighted and pulsing), and the vehicle. It is not a canned
+animation: the vehicle reacts to the *same* `direction` value the controller receives,
+so `F` drives it forward, `B` reverses, `L`/`R` steer, and `S` stops it, with the wheels
+spinning at its speed.
 
 **Looking around.** The camera is fully free:
 
 | Gesture | Does |
 | --- | --- |
 | Left-drag | Orbit a full 360° around the subject, from ground level up to overhead |
-| Scroll | Zoom in and out (4–36 units) |
+| Scroll | Zoom in and out (4–44 units) |
 | Right-drag | Pan the view |
 | **Reset view** | Restore the starting angle and distance |
-| **Reset point** | Return the car to `(60 cm, 0 cm)` and clear its completed path |
 
 Whatever angle and distance you choose is kept as the vehicle drives — the camera moves
 *with* it rather than snapping back, so the subject never leaves the frame. The pitch
@@ -568,7 +540,7 @@ A five-button pad laid out the way you would expect:
           ▼ Backward (B)
 ```
 
-Pressing a button writes that single letter to `BMS_5578/direction` immediately. The
+Pressing a button writes that single letter to `bms_5578/direction` immediately. The
 command **stays latched** until you press another button — the pad highlights whichever
 one is currently active (Stop highlights red), and the readout underneath repeats it.
 
@@ -591,7 +563,7 @@ three buttons:
 
 - **Route name** — must be unique; duplicates are rejected with a message.
 - **Steps** — each row is a direction dropdown (Forward / Backward / Left / Right /
-  Stop) and a seconds box (0.1–600, in 0.1-second / 100 ms increments). Reorder with **↑ / ↓**, remove with **✕**, and add
+  Stop) and a seconds box (1–600). Reorder with **↑ / ↓**, remove with **✕**, and add
   more with **+ Add step**. The total run time updates as you edit.
 - **Save route** / **Update route** writes to `/auto_routes`; **Cancel** discards.
 
@@ -608,7 +580,7 @@ editing — no saving required.
 | **Stop test** | Ends the trial immediately and writes `S` |
 
 > **A test moves the real vehicle.** It writes the same letters to
-> `BMS_5578/direction` that a saved route does. The only difference is bookkeeping —
+> `bms_5578/direction` that a saved route does. The only difference is bookkeeping —
 > nothing is written to `/auto_routes`, and finishing a test never marks the vehicle
 > arrived or advances a reservation.
 
@@ -620,13 +592,6 @@ the two are independent, so you can test as many times as you like before saving
 **While a route plays**, a panel shows the route name, `Step 2 / 4`, the current
 direction, a live seconds countdown, and a progress track of all steps (done / current /
 pending). **Stop route** halts it and writes `S`.
-
-The 3D route view represents the physical **120 × 160 cm demonstration sheet** at
-10 cm per scene unit. A small top-view car starts at the bottom centre `(60 cm, 0 cm)`.
-Only the current direction is shown ahead as live guidance; future route steps stay hidden.
-The car follows the active route timing while its completed path is recorded separately.
-The final position is marked and reported.
-**Reset point** returns the car to the starting position and clears the travelled path when no route is running.
 
 Playback is cancelled and `S` written if you switch to Manual, press **Stop vehicle**,
 delete the running route, or leave the screen.
@@ -640,9 +605,11 @@ prompt, and a red **Stop vehicle** button that always sends `S` immediately.
 
 ### 8.4 Charging — wireless charging session
 
-**Live Vehicle Route Position.** Charging uses the same 120 × 160 cm map, top-view car,
-current-step guidance and completed-path presentation as Overview and Drive Control.
-The animation no longer switches to a separate docking or energy-ring scene.
+**Live 3D Charging View.** The same scene in docked mode — the vehicle eases onto the
+reserved station's transmitter pad. The camera orbits it slowly on its own until you
+touch it, after which it is yours (same drag / scroll / right-drag / **Reset view** as
+on Drive Control). While a session is active, energy rings climb from the pad to the
+vehicle; they slow and dim when charging is paused.
 
 **Summary bar.** Selected station, Arrival Confirmed/Pending, Coil Alignment
 Confirmed/Pending, and a Cooling Active flag showing pump and fan state.
@@ -660,9 +627,6 @@ statistics:
 | Vehicle voltage | `Voltage1` |
 | Station voltage | `Voltage2` |
 | Current | Live pack current |
-
-At 100% SOC, charging stops automatically and a prominent **Vehicle Full — 100%
-Charged** message replaces the active/standby status.
 
 **Safety checks.** Battery connected, Temperature safe, Station confirmed — each green
 when satisfied.
@@ -686,7 +650,7 @@ charging resumes automatically once the battery cools.
 
 | Card | States |
 | --- | --- |
-| Temperature Status | `NORMAL` / `WARNING` (≥ 30 °C) / `CRITICAL` (≥ 40 °C) |
+| Temperature Status | `NORMAL` / `WARNING` (≥ 65 °C) / `CRITICAL` (≥ 70 °C) |
 | Coolant Pump (Relay1) | `ON` (coolant flow active) / `OFF` |
 | Cooling Fan (Relay2) | `ON` (extracting heat) / `OFF` |
 | Charging Status | `ACTIVE` / `NORMAL ONLY` / `PAUSED` |
@@ -695,18 +659,19 @@ charging resumes automatically once the battery cools.
 **Cooling Control (Liquid Cooling).** Shows the warning and critical thresholds and a
 system summary of pump, fan, heater pad and temperature sensor.
 
-- **Automatic cooling** — the dashboard Heat % control raises `Temp` at a proportional
-  rate. At 30 °C the app forces `Heat = 0` and switches pump `Relay1` and fan `Relay2`
-  to 1. While ON, temperature falls by 0.5 °C/s and cannot increase; both release at 27 °C.
+- **Automatic** (default) — the app switches **both** `Relay1` and `Relay2` to 1 at
+  65 °C or when the heating level reaches 65 %, and back to 0 once the battery is at
+  60 °C *and* heat is below 65 %.
 - **Manual** — enables **Turn cooling ON / OFF** (both relays together) plus individual
   **Pump (Relay1)** and **Fan (Relay2)** toggles.
 
-**Artificial Battery Heating (Heat %).** A 0–100 % slider writing to `BMS_5578/Heat`,
+**Artificial Battery Heating (Heat %).** A 0–100 % slider writing to `bms_5578/Heat`,
 plus **Turn heater ON** (sets 40 %) and **Turn heater OFF**. It exists to raise battery
 temperature deliberately so the thermal-safety chain can be demonstrated.
 
-The slider is the temperature-increase control. **Turn heater OFF** stops additional
-heating; automatic fan cooling takes priority whenever the limit is reached.
+The heater is **locked OFF and the slider disabled** whenever the battery is at or above
+65 °C — the safety cut-off overrides any manual setting, including one applied from
+another client.
 
 **Thermal loop diagram.** A live schematic of the sensor, heater pad, battery pack,
 coolant pipes, and pump + fan, animating with the real relay states, heat level, and
@@ -744,7 +709,7 @@ A complete demo run, start to finish:
 2. **Watch Overview** — metric cards fill with live vehicle voltage, station voltage,
    current, temperature, SOC and SOH; sparklines begin building history.
 3. **Open Drive Control.** In **Manual** mode, press **Forward** — `F` goes straight to
-   `BMS_5578/direction`, and the 3D vehicle drives forward with it. Try **Left**,
+   `bms_5578/direction`, and the 3D vehicle drives forward with it. Try **Left**,
    **Right**, **Backward**, then **Stop**.
 4. **Switch to Auto.** Click **+ New route**, name it, and build
    `F 5s → L 10s → R 8s → B 9s` with **+ Add step**.
@@ -755,16 +720,19 @@ A complete demo run, start to finish:
    traces the route you programmed. **Stop route** cancels early.
 6. **Edit and delete.** Reopen the route with **Edit**, change a timing, **Update
    route** — same id, updated in place. **Delete** removes it.
-7. **Open Stations** and reserve an available station. The controller handshake starts
-   the selected station path.
-8. **Approach the reserved station.** When its `SlotN` ultrasonic sensor detects the
-   robot at a valid distance below 20 cm, the dashboard stops it, requests the relay, and waits for relay
-   ON feedback before calculating charging.
-9. **Watch the session** — mode, SOC, session timer, live power and energy delivered.
-   At 100% it stops and displays **Vehicle Full**.
-10. **Demonstrate thermal automation** — raise **Heat %** on Thermal Control. Temperature
-    rises according to the selected level. At **30 °C**, Heat turns OFF and the pump and fan turn
-    ON automatically. Temperature cools by 0.5 °C/s, and cooling turns OFF at **27 °C**.
+7. **Open Stations**, pick an available one, **Reserve**, choose your saved route, then
+   **Confirm & Play** — Drive Control opens and the route runs. When the last step ends,
+   the vehicle is marked arrived.
+8. **On arrival**, click **Start Wireless Charging** on the side panel, then open the
+   Charging screen to watch the energy rings.
+9. **Watch the session** — mode, SOC, session timer, live power, energy delivered.
+10. **Demonstrate thermal safety** — open Thermal Control and raise the Heat % slider.
+    As the battery warms:
+    - at **65 %** heat, pump and fan engage proactively;
+    - at **65 °C**, heating is force-cut, pump + fan engage, fast charging downgrades,
+      and an overheat alert appears;
+    - at **70 °C**, charging pauses automatically;
+    - as it cools back to **60 °C**, both relays release.
 11. **Review Health & Alerts** — the alert table shows every rule that fired and the
     event log gives the timestamped story of the whole run.
 
@@ -863,7 +831,7 @@ Vercel needs no configuration beyond pointing it at the repo.
 > ### Read this before you make the URL public
 >
 > Firebase's web config always ships inside the client bundle; that is normal and
-> unavoidable. What matters is the **database rules**. While `/BMS_5578` and
+> unavoidable. What matters is the **database rules**. While `/bms_5578` and
 > `/auto_routes` are world-writable, **anyone who opens the deployed link can drive the
 > vehicle** — press Forward, toggle the heater and relays, or delete saved routes.
 >
@@ -926,7 +894,7 @@ project root. Both commands open a browser to authenticate.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| All metrics show `—` | Nothing has been written to `/BMS_5578` yet. Check the controller and confirm the node exists in the Firebase console. |
+| All metrics show `—` | Nothing has been written to `/bms_5578` yet. Check the controller and confirm the node exists in the Firebase console. |
 | **SOC stuck at 0 % and a permanent low-battery alert** | `Voltage1` is below `SOC_VOLTAGE_MIN`. Set `SOC_VOLTAGE_MIN` / `SOC_VOLTAGE_MAX` in `store.js` to your sensor's actual empty/full range. |
 | IoT Cloud Link shows **Offline** | Wrong `databaseURL` in [src/firebase.js](src/firebase.js), no internet, or database rules denying reads. |
 | Distances and bearings show `—` | Location permission denied or unavailable. Click **Refresh Current Location** on the Stations screen and allow the prompt. Chrome requires `localhost` or HTTPS for geolocation. |
@@ -939,9 +907,9 @@ project root. Both commands open a browser to authenticate.
 | Scrolling over the 3D view zooms instead of scrolling the page | That is the 3D viewport taking the wheel gesture. Move the pointer off the scene to scroll the page. |
 | Lost the vehicle in the 3D view | Press **Reset view** to restore the default angle and distance. |
 | A route keeps driving after you leave | It shouldn't — leaving the screen writes `S`. If the vehicle keeps moving, the controller is not reading `direction`; check the firmware's subscription. |
-| Fan turns back ON after manual OFF | Temperature is still at or above 30 °C; automatic protection re-enables it. |
-| Temperature does not rise | Set Heat above 0%. Heating is intentionally blocked while the automatic fan is ON. |
-| Fast charging is disabled | Coil alignment has not yet been confirmed. |
+| Cooling buttons are greyed out | You are in **Automatic** mode. Switch to **Manual** on the Thermal screen or in the Overview alert card. |
+| Heating slider is disabled | Battery is at or above 65 °C — the safety cut-off has locked it. Let the pack cool. |
+| Fast charging is disabled | Coil not aligned yet, or temperature at/above 65 °C. |
 | Vite refuses to start | Node version too old. Vite 8 needs Node 20.19+ or 22.12+. |
 
 ---
@@ -959,13 +927,11 @@ Known constraints, stated plainly:
 - **Auto-route timing is open-loop.** Steps are held for wall-clock seconds; there is no
   odometry, encoder or GPS feedback confirming the vehicle actually travelled that far.
   The GPS distance and bearing readouts *are* real.
-- **Auto-charging arrival is sensor-driven.** It depends on the reserved station's
-  `SlotN` ultrasonic reading being greater than 0 and below 20 cm; tune and validate
-  the physical sensor before production use.
+- **Arrival detection is not sensor-driven.** The vehicle is marked arrived when the
+  auto route's last step finishes, not by a physical arrival sensor.
 - **The 3D view is an illustration, not a digital twin.** It integrates the live
   `direction` command over time with fixed speed and turn rates, so it shows what the
-  vehicle was *told* to do — not surveyed position. The map is scaled to the 120 × 160 cm
-  demonstration sheet, but its position remains an estimate until a physical tracker is connected.
+  vehicle was *told* to do — not surveyed position. Yard layout and scale are arbitrary.
 - **The 3D vehicle carries no battery readout.** SOC, health and thermal state are read
   from the metric cards, sidebar and Thermal screen; the 3D view is purely the vehicle
   and the yard.
