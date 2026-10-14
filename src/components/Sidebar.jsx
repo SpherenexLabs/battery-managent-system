@@ -5,7 +5,7 @@ import { formatClock } from '../utils/format.js';
 const NAV_ITEMS = [
   { id: 'overview', label: 'Overview', Icon: IconHome },
   { id: 'stations', label: 'Stations', Icon: IconStation },
-  { id: 'navigation', label: 'Navigation', Icon: IconNav },
+  { id: 'navigation', label: 'Vehicle Tracking', Icon: IconNav },
   { id: 'charging', label: 'Charging', Icon: IconBolt },
   { id: 'thermal', label: 'Thermal Control', Icon: IconThermo },
   { id: 'health', label: 'Health & Alerts', Icon: IconBell },
@@ -24,6 +24,7 @@ export default function Sidebar() {
   const hasSoc = state.soc != null;
   const range = hasSoc ? Math.round(state.soc * 3.1) : null;
   const sod = hasSoc ? Math.round(100 - state.soc) : null;
+  const vehicleLabel = state.charging.mode === 'complete' ? 'Vehicle Full' : VEHICLE_LABEL[state.vehicleStatus];
 
   return (
     <aside className="sidebar">
@@ -51,7 +52,7 @@ export default function Sidebar() {
           <span>Vehicle Status</span>
           <span className="status-dot-wrap">
             <span className="status-dot" style={{ background: 'var(--accent)' }} />
-            {VEHICLE_LABEL[state.vehicleStatus]}
+            {vehicleLabel}
           </span>
         </div>
         <div className="sidebar-footer-metric">
